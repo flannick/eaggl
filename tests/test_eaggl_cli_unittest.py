@@ -23,6 +23,12 @@ class EagglCliTest(unittest.TestCase):
         err = (proc.stderr or "") + (proc.stdout or "")
         self.assertIn("belongs to pigean.py", err)
 
+    def test_removed_gene_zs_flag_is_rejected(self) -> None:
+        proc = self._run("factor", "--gene-zs-in", "dummy.tsv")
+        self.assertNotEqual(proc.returncode, 0)
+        err = (proc.stderr or "") + (proc.stdout or "")
+        self.assertIn("option --gene-zs-in has been removed and is no longer supported", err)
+
 
 if __name__ == "__main__":
     unittest.main()
