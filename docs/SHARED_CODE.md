@@ -1,5 +1,7 @@
 # Shared Code Between `pigean` and `eaggl`
 
+Status: optional future design. Current implementation intentionally duplicates code between repos for simplicity.
+
 ## Goal
 
 Avoid duplicated maintenance for shared table I/O code (for example:
