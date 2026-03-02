@@ -182,6 +182,35 @@ class EagglCliTest(unittest.TestCase):
             self.assertEqual(options["gene_stats_in"], str(override_gene_stats))
             self.assertTrue(options["gene_set_stats_in"].endswith("gene_set_stats.tsv.gz"))
 
+    def test_read_correlations_fails_fast_when_gls_cholesky_is_initialized(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        snippet = r"""
+import sys
+import numpy as np
+sys.argv = ["eaggl.py", "factor", "--ols"]
+import src.eaggl as eaggl
+g = eaggl.GeneSetData()
+g.y_corr_cholesky = np.array([[1.0]])
+g.genes = ["GENE1"]
+g.gene_to_ind = {"GENE1": 0}
+try:
+    g._read_correlations(gene_loc_file="definitely_missing.tsv")
+except Exception as ex:
+    msg = str(ex)
+    if "Cannot read/sort correlations after initializing full GLS correlation state" not in msg:
+        raise SystemExit("unexpected error: " + msg)
+    raise SystemExit(0)
+raise SystemExit("expected _read_correlations to fail fast before file IO")
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, msg=(proc.stderr or "") + (proc.stdout or ""))
+
 
 if __name__ == "__main__":
     unittest.main()

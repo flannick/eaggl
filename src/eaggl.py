@@ -9705,7 +9705,16 @@ class GeneSetData(object):
 
                 Y_sample_m = priors_for_Y_m + log_bf_m
                 Y_raw_sample_m = priors_for_Y_m + log_bf_raw_m
+                if not np.all(np.isfinite(Y_sample_m)):
+                    bail("Encountered non-finite combined Y values during Gibbs; aborting to avoid unstable beta-tilde updates")
                 y_var = np.var(Y_sample_m, axis=1)
+                if not np.all(np.isfinite(y_var)):
+                    bad_chain_v = np.where(~np.isfinite(y_var))[0] + 1
+                    bail("Encountered non-finite Y variance in Gibbs chain(s): %s" % ",".join([str(x) for x in bad_chain_v]))
+                low_var_mask = y_var <= 0
+                if np.any(low_var_mask):
+                    y_var[low_var_mask] = 1e-12
+                    log("Applied Y variance floor for %d chain(s) with non-positive combined-Y variance" % np.sum(low_var_mask), DEBUG)
 
                 #if adjust_background_prior:
                 #    #get the original mean bf
@@ -9751,10 +9760,8 @@ class GeneSetData(object):
                 #    log("Not centering combined")
 
 
-                #We must normalize Y_sample_m for the compute beta tildes!
-                #FIXME: this led to a bug and should be updated to prevent errors in the future
-                #TESTING removal of this standardization
-                #Y_sample_m = (Y_sample_m.T - np.mean(Y_sample_m, axis=1)).T
+                # Keep Y_sample_m on the original log-odds scale.
+                # _compute_beta_tildes handles mean-centering internally.
 
                 #var(Y) = E[var(Y|S,beta)] + var(E[Y|S,beta])
                 #First term can be estimated from the gibbs samples
@@ -15178,6 +15185,8 @@ class GeneSetData(object):
             return chrom
 
     def _read_correlations(self, gene_cor_file=None, gene_loc_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, compute_correlation_distance_function=True):
+        if self.y_corr_cholesky is not None:
+            bail("Cannot read/sort correlations after initializing full GLS correlation state (y_corr_cholesky). Re-run correlation setup before enabling full GLS, or disable full GLS for this step.")
         if gene_cor_file is not None:
             log("Reading in correlations from %s" % gene_cor_file)
             unique_genes = np.array([True] * len(self.genes))
