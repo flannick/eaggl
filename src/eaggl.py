@@ -8,8 +8,8 @@
 #import cProfile
 #import resource
 
-#import urllib.request #used (below) only if you specify a URL as an input file
-#import requests #used (below) only if you specify --lmm-auth-key
+import urllib.error
+import urllib.request
 
 import optparse
 import sys
@@ -28,6 +28,23 @@ import itertools
 import gzip
 import random
 
+try:
+    from .pegs_utils import (
+        is_remote_path as pegs_is_remote_path,
+        json_safe as pegs_json_safe,
+        load_json_config as pegs_load_json_config,
+        merge_dicts as pegs_merge_dicts,
+        resolve_config_path_value as pegs_resolve_config_path_value,
+    )
+except ImportError:
+    from pegs_utils import (
+        is_remote_path as pegs_is_remote_path,
+        json_safe as pegs_json_safe,
+        load_json_config as pegs_load_json_config,
+        merge_dicts as pegs_merge_dicts,
+        resolve_config_path_value as pegs_resolve_config_path_value,
+    )
+
 random.seed(0)
 
 def bail(message):
@@ -35,27 +52,8 @@ def bail(message):
     sys.stderr.write("%s\n" % (message))
     sys.exit(1)
 
-def get_current_memory_usage_linux(tag=None):
-    with open('/proc/self/status') as f:
-        for line in f:
-            if 'VmRSS' in line:  # Resident Set Size
-                memory_kb = int(line.split()[1])  # Memory in KB
-                if tag is not None:
-                    print(tag)
-                print(f"Current memory usage: {memory_kb / 1024:.2f} MB")
-                get_memory_usage()
-                return memory_kb / 1024
-
-def get_memory_usage():
-    import resource
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # Max RSS in KB
-    print(f"Max memory usage: {usage / 1024:.2f} MB")
-
-
 usage = "usage: eaggl.py [factor|naive_factor] [options]"
 
-def get_comma_separated_args_as_float(option, opt, value, parser):
-    setattr(parser.values, option.dest, [float(x) for x in value.split(',')])
 def get_comma_separated_args(option, opt, value, parser):
     setattr(parser.values, option.dest, value.split(','))
 def get_comma_separated_args_as_set(option, opt, value, parser):
@@ -73,132 +71,55 @@ parser.add_option("","--X-in",action="append",default=None)
 parser.add_option("","--X-list",action="append",default=None)
 parser.add_option("","--Xd-in",action="append",default=None)
 parser.add_option("","--Xd-list",action="append",default=None)
-parser.add_option("","--X-out",default=None)
-parser.add_option("","--Xd-out",default=None)
 parser.add_option("","--ignore-genes",action='append',default=["NA"]) #gene names to ignore
 parser.add_option("","--batch-separator",default="@") #separator for batches
 parser.add_option("","--file-separator",default=None) #separator for multiple files
 
 #model parameters
 parser.add_option("","--p-noninf",type=float,default=None,action='append') #initial parameter for p
-parser.add_option("","--sigma2-cond",type=float,default=None) #specify conditional sigma value (sigma/p). Precedence 1
-parser.add_option("","--sigma2-ext",type=float,default=None) #specify sigma in external units. Precedence 2
-parser.add_option("","--sigma2",type=float,default=None) #specify sigma in internal units (this is what the code outputs to --sigma-out). Precedence 3
 parser.add_option("","--top-gene-set-prior",type=float,default=None) #specify the top prior efect we are expecting any of the gene sets to have (after all of the calculations). This is the top prior across all gene sets. Precedence 4
 parser.add_option("","--num-gene-sets-for-prior",type=int,default=None) #specify the top prior efect we are expecting any of the gene sets to have (after all of the calculations). This is the either the number of non-zero gene sets (by default) or the total number of gene sets (if --frac-gene-sets-for-prior is set to a number below 1).  Precedence 4
-parser.add_option("","--frac-gene-sets-for-prior",type=float,default=1) #specify the top prior efect we are expecting any of the gene sets to have (after all of the calculations). If this is changed from its default value of 1, it will fit sigma-cond from top and num, and then convert to (internally stored) total var. Precedence 4
 parser.add_option("","--sigma-power",type='float',default=None) #multiply sigma times np.power(scale_factors,sigma_power). 2=const_sigma, 0=default. Larger values weight larger gene sets more
-parser.add_option("","--sigma-soft-threshold-95",type='float',default=None) #the gene set size at which threshold is 0.95
-parser.add_option("","--sigma-soft-threshold-5",type='float',default=None) #the gene set size at which threshold is 0.05
 
 
-parser.add_option("","--const-sigma",action='store_true') #assign constant variance across all gene sets independent of size (default is to scale inversely to size). Overrides sigma power and sets it to 2
 
 parser.add_option("","--update-hyper",type='string',default=None,dest="update_hyper") #update either both,p,sigma,none
-parser.add_option("","--cross-val",action='store_true',dest="cross_val",default=None) #after initial learning of p and sigma, do cross validation to tune sigma further
-parser.add_option("","--no-cross-val",action='store_false',dest="cross_val",default=None) #after initial learning of p and sigma, do cross validation to tune sigma further
-parser.add_option("","--cross-val-num-explore-each-direction",type='int',default=3) #the number of orders of magnitude canges to try cross validation for
-parser.add_option("","--cross-val-max-num-tries",type='int',default=2) #if the best cross validation result is a boundary, then re-explore further in that direction. Repeat this many times
-parser.add_option("","--cross-val-folds",type='int',default=4) #the number of orders of magnitude canges to try cross validation for
-parser.add_option("","--sigma-num-devs-to-top",default=2.0,type=float) #update sigma based on top gene set being this many devs away from zero
-parser.add_option("","--p-noninf-inflate",default=1.0,type=float) #update p by multiplying it by this each time you learn it
 
-parser.add_option("","--batch-all-for-hyper",action="store_true") #combine everything into one batch for learning hyper
-parser.add_option("","--first-for-hyper",action="store_true") #use first batch / dataset (that is, the batch of the first --X; may include other files too) to learn parameters for unlabelled batches (label batches with "@{batch_id}" as abov)
-parser.add_option("","--first-for-sigma-cond",action="store_true") #use first batch to fix sigma/p ratio and use that for all other batches. 
-parser.add_option("","--first-max-p-for-hyper",action="store_true") #use first batch / dataset (that is, the batch of the first --X; may include other files too) to learn the maximum parameters for unlabelled batches (label batches with "@{batch_id}" as above)
 
 parser.add_option("","--background-prior",type=float,default=0.05) #specify background prior
 
 #correlation matrix (otherwise will be calculated from X)
 parser.add_option("","--V-in",default=None)
-parser.add_option("","--V-out",default=None)
-parser.add_option("","--shrink-mat-out",default=None)
 
 #optional gene name map
 parser.add_option("","--gene-map-in",default=None)
 parser.add_option("","--gene-map-orig-gene-col",default=1) #1-based column for original gene
-parser.add_option("","--gene-map-new-gene-col",default=2) #1-based column for original gene
 
 #GWAS association statistics (for HuGECalc)
 parser.add_option("","--gwas-in",default=None)
 parser.add_option("","--huge-statistics-in",default=None) #read precomputed HuGE statistics cache (equivalent to --gwas-in path)
 parser.add_option("","--huge-statistics-out",default=None) #write precomputed HuGE statistics cache from --gwas-in path
-parser.add_option("","--gwas-locus-col",default=None)
-parser.add_option("","--gwas-chrom-col",default=None)
-parser.add_option("","--gwas-pos-col",default=None)
-parser.add_option("","--gwas-p-col",default=None)
-parser.add_option("","--gwas-beta-col",default=None)
-parser.add_option("","--gwas-se-col",default=None)
-parser.add_option("","--gwas-units",type=float,default=None)
-parser.add_option("","--gwas-n-col",default=None)
-parser.add_option("","--gwas-n",type='float',default=None)
-parser.add_option("","--gwas-freq-col",default=None)
-parser.add_option("","--gwas-filter-col",default=None) #if specified, only include rows of the gwas file where this column matches --gwas-filter-val
-parser.add_option("","--gwas-filter-value",default=None) #if specified, only include rows of the gwas file where this value is observed in --gwas-filter-col
-parser.add_option("","--gwas-ignore-p-threshold",type=float,default=None) #completely ignore anything with p above this threshold
 
 #credible sets
 parser.add_option("","--credible-sets-in",default=None) #pass in credible sets to use 
-parser.add_option("","--credible-sets-id-col",default=None)
-parser.add_option("","--credible-sets-chrom-col",default=None)
-parser.add_option("","--credible-sets-pos-col",default=None)
-parser.add_option("","--credible-sets-ppa-col",default=None)
-parser.add_option("","--credible-set-span",type=float,default=25000) #if user specified credible sets, ignore all variants within this var of a variant in the credible set
 
 
 #S2G values (for HuGeCalc)
 parser.add_option("","--s2g-in",default=None)
-parser.add_option("","--s2g-chrom-col",default=None)
-parser.add_option("","--s2g-pos-col",default=None)
-parser.add_option("","--s2g-gene-col",default=None)
-parser.add_option("","--s2g-prob-col",default=None)
-parser.add_option("","--s2g-normalize-values",type=float,default=None) #for each variant, set sum of probabilities across genes to be equal to this value. Relative values are kept the same
 
 #Exomes association statistics (for HuGeCalc)
 parser.add_option("","--exomes-in",default=None)
-parser.add_option("","--exomes-gene-col",default=None)
-parser.add_option("","--exomes-p-col",default=None)
-parser.add_option("","--exomes-beta-col",default=None)
-parser.add_option("","--exomes-se-col",default=None)
-parser.add_option("","--exomes-units",type=float,default=None)
-parser.add_option("","--exomes-n-col",default=None)
-parser.add_option("","--exomes-n",type='float',default=None)
 
 #Positive control genes
 parser.add_option("","--positive-controls-in",default=None)
-parser.add_option("","--positive-controls-id-col",default=None)
-parser.add_option("","--positive-controls-prob-col",default=None)
 parser.add_option("","--positive-controls-list",type="string",action="callback",callback=get_comma_separated_args,default=None) #specify comma separated list of positive controls on the command line
-parser.add_option("","--positive-controls-default-prob",type=float,default=0.95)
-parser.add_option("","--positive-controls-no-header",action="store_false", dest="positive_controls_has_header", default=True)
 parser.add_option("","--positive-controls-all-in",default=None) #all genes to use in positive control analysis. If specified add these on top of the positive controls
-parser.add_option("","--positive-controls-all-id-col",default=None)
-parser.add_option("","--positive-controls-all-no-header",action="store_false", dest="positive_controls_all_has_header", default=True)
 
 #Case counts
 #rows add across genes
 #to encode loss of function, use revel value above 1
 parser.add_option("","--case-counts-in",default=None)
-parser.add_option("","--case-counts-gene-col",default=None)
-parser.add_option("","--case-counts-revel-col",default=None)
-parser.add_option("","--case-counts-count-col",default=None)
-parser.add_option("","--case-counts-tot-col",default=None)
-parser.add_option("","--case-counts-max-freq-col",default=None)
 parser.add_option("","--ctrl-counts-in",default=None)
-parser.add_option("","--ctrl-counts-gene-col",default=None)
-parser.add_option("","--ctrl-counts-revel-col",default=None)
-parser.add_option("","--ctrl-counts-count-col",default=None)
-parser.add_option("","--ctrl-counts-tot-col",default=None)
-parser.add_option("","--ctrl-counts-max-freq-col",default=None)
-parser.add_option("","--counts-min-revels",type="string",action="callback",callback=get_comma_separated_args_as_float,default=[0.4, 0.6, 0.8, 1]) #each of these will be used to define a group of variants with revel score >= the value.
-parser.add_option("","--counts-mean-rrs",type="string",action="callback",callback=get_comma_separated_args_as_float,default=[1.3, 1.6, 2.5, 3.8]) #these parameters will be the parameters used in TADA corresponding to each --min-revel. Must be same length as --counts-min-revels
-parser.add_option("","--counts-max-case-freq",type="float",default=0.001)
-parser.add_option("","--counts-max-ctrl-freq",type="float",default=0.001)
-parser.add_option("","--counts-syn-revel",type="float",default=0) #filter out variants with dramatic differences in frequencies below this threshold
-parser.add_option("","--counts-syn-fisher-p",type="float",default=1e-4) #minimum fisher test p-value for synonymous frequency comparison to keep gene
-parser.add_option("","--counts-nu",type="float",default=1.0) #nu parameter
-parser.add_option("","--counts-beta",type="float",default=1.0) #beta parameter
 
 #association statistics for gene bfs in each gene set (if precomputed)
 #REMINDER: the betas are all in *external* units
@@ -213,9 +134,6 @@ parser.add_option("","--gene-set-stats-p-col",default=None)
 parser.add_option("","--ignore-negative-exp-beta",action='store_true')
 
 #if you have gene set betas
-parser.add_option("","--gene-set-betas-in",default=None)
-parser.add_option("","--const-gene-set-beta",default=None,type=float)
-parser.add_option("","--const-gene-Y",default=None,type=float)
 
 #gene statistics to use in calculating gene set statistics
 parser.add_option("","--gene-stats-in",dest="gene_stats_in",default=None)
@@ -225,28 +143,19 @@ parser.add_option("","--gene-stats-combined-col",default=None,dest="gene_stats_c
 parser.add_option("","--gene-stats-prior-col",default=None,dest="gene_stats_prior_col")
 parser.add_option("","--gene-stats-prob-col",default=None,dest="gene_stats_prob_col")
 parser.add_option("","--eaggl-bundle-in",default=None) #read bundled PIGEAN outputs and use as default EAGGL inputs
-parser.add_option("","--const-gene-log-bf",default=None,type=float)
 
 #locations of genes
 #ALL GENE LOC FILES MUST BE IN FORMAT "GENE CHROM START END STRAND GENE" 
 parser.add_option("","--gene-loc-file",default=None)
-parser.add_option("","--gene-loc-file-huge",default=None)
-parser.add_option("","--exons-loc-file-huge",default=None)
 parser.add_option("","--gene-cor-file",default=None)
-parser.add_option("","--gene-cor-file-gene-col",type=int,default=1)
-parser.add_option("","--gene-cor-file-cor-start-col",type=int,default=10)
 
 #additional covariates to use in the model
-parser.add_option("","--no-correct-huge",default=True,action='store_false',dest="correct_huge") #don't correct huge scores for confounding variables. If --correct-huge, these covariates will be added on top of any extra covariates
 parser.add_option("","--gene-covs-in",default=None) #extra covariates to correct Y 
 
 #output files for stats
 parser.add_option("","--gene-set-stats-out",default=None)
 parser.add_option("","--phewas-gene-set-stats-out",default=None)
-parser.add_option("","--gene-set-stats-trace-out",default=None)
-parser.add_option("","--betas-trace-out",default=None)
 parser.add_option("","--gene-stats-out",default=None)
-parser.add_option("","--gene-stats-trace-out",default=None)
 parser.add_option("","--gene-gene-set-stats-out",default=None)
 parser.add_option("","--gene-set-overlap-stats-out",default=None)
 parser.add_option("","--gene-covs-out",default=None)
@@ -303,7 +212,6 @@ parser.add_option("","--ols",action='store_true') #run ordinary least squares ra
 parser.add_option("","--linear",action='store_true',dest="linear",default=None) #run linear regression on odds rather than logistic regression on binary disease status. Applies only to beta_tildes and priors, not gibbs
 parser.add_option("","--no-linear",action='store_false',dest="linear",default=None) #run linear regression on odds rather than logistic regression on binary disease status. Applies only to beta_tildes and priors, not gibbs
 parser.add_option("","--max-for-linear",type='float',default=None) #if linear regression is specified, it will switch to logistic regression if a probability exceeds this value
-parser.add_option("","--use-sampling-for-betas",type='int',default=None) #rather than taking top X% of gene sets to be positive during gene set statistics, sample from probability distribution
 
 
 #other control
@@ -320,8 +228,6 @@ parser.add_option("","--max-read-entries-at-once",type="int",default=None) #cap 
 parser.add_option("","--batch-size",type=int,default=5000) #maximum number of dense X columns to hold in memory at once
 parser.add_option("","--pre-filter-batch-size",type=int,default=None) #if more than this number of gene sets are about to go into non inf betas, do pre-filters on smaller batches. Assumes smaller batches will only have higher betas than full batches
 parser.add_option("","--pre-filter-small-batch-size",type=int,default=500) #the limit to use for the smaller pre-filtering batches
-parser.add_option("","--max-allowed-batch-correlation",type=float,default=0.5) #technically we need to update each gene set sequentially during sampling; for efficiency, group those for simultaneous updates that have max_allowed_batch_correlation below this threshold
-parser.add_option("","--no-initial-linear-filter",default=True,action="store_false",dest="initial_linear_filter") #within gibbs sampling, first run a linear regression to remove non-associated gene sets (reducing number that require full logistic regression)
 
 #parameters for filtering gene sets
 parser.add_option("","--min-gene-set-size",type=int,default=None) #ignore genes with fewer genes than this (after removing for other reasons)
@@ -329,12 +235,9 @@ parser.add_option("","--filter-gene-set-p",type=float,default=None) #gene sets w
 parser.add_option("","--filter-negative",default=None,action="store_true",dest="filter_negative") #after sparsifying, remove any gene sets with negative beta tilde (under assumption that we added the "wrong" extreme)
 parser.add_option("","--no-filter-negative",default=None,action="store_false",dest="filter_negative") #after sparsifying, remove any gene sets with negative beta tilde (under assumption that we added the "wrong" extreme)
 
-parser.add_option("","--increase-filter-gene-set-p",type=float,default=0.01) #require at least this fraction of gene sets to be kept from each file
 parser.add_option("","--max-num-gene-sets-initial",type=int,default=None) #ignore gene sets to reduce to this number. Uses nominal p-values. Happens before expensive operations (pruning, parameter estimation, non-inf betas)
 parser.add_option("","--max-num-gene-sets-hyper",type=int,default=5000) #use at most this number of gene sets for hyper parameter estimation (this occurs before the max-num-gene-sets operation)
 parser.add_option("","--max-num-gene-sets",type=int,default=5000) #ignore gene sets to reduce to this number. Uses pruning to find independent gene sets with highest betas. Happens afer expensive operations (pruning, parameter estimation) but before gibbs
-parser.add_option("","--min-num-gene-sets",type=int,default=1) #increase filter_gene_set_p as needed to achieve this number of gene sets
-parser.add_option("","--filter-gene-set-metric-z",type=float,default=2.5) #gene sets with combined outlier metric z-score above this threshold are never seen (must have correct-huge turned on for this to work)
 parser.add_option("","--max-gene-set-read-p",type=float,default=.05) #gene sets with p above this are excluded from the original beta analysis but included in gibbs
 parser.add_option("","--min-gene-set-read-beta",type=float,default=1e-20) #gene sets with beta below this are excluded from reading in the gene stats file
 parser.add_option("","--min-gene-set-read-beta-uncorrected",type=float,default=1e-20) #gene sets with beta below this are excluded from reading in the gene set stats file
@@ -353,44 +256,15 @@ parser.add_option("","--prune-deterministically",action="store_true") #prune in 
 
 
 #gwas/huge mapping parameter
-parser.add_option("","--gene-zs-gws-prob-true",type=float,default=None) #specify probability genes at the significance threshold are true associations
 
 #huge exomes parametersa
-parser.add_option("","--exomes-high-p",type=float,default=5e-2) #specify the larger p-threshold for which we will constrain posterior
-parser.add_option("","--exomes-high-p-posterior",type=float,default=0.1) #specify the posterior at the larger p-threshold
-parser.add_option("","--exomes-low-p",type=float,default=2.5e-6) #specify the smaller p-threshold for which we will constrain posterior 
-parser.add_option("","--exomes-low-p-posterior",type=float,default=0.95) #specify the posterior at the smaller p-threshold
 
 #huge gwas parametersa
-parser.add_option("","--gwas-high-p",type=float,default=1e-2) #specify the larger p-threshold for which we will constrain posterior
-parser.add_option("","--gwas-high-p-posterior",type=float,default=0.01) #specify the posterior at the larger p-threshold
-parser.add_option("","--gwas-low-p",type=float,default=5e-8) #specify the smaller p-threshold for which we will constrain posterior 
-parser.add_option("","--gwas-low-p-posterior",type=float,default=0.75) #specify the posterior at the smaller p-threshold
-parser.add_option("","--gwas-detect-low-power",type=int,default=10) #scale --gwas-low-p automatically to have at least this number signals reaching it; set to 0 to disable this
-parser.add_option("","--gwas-detect-high-power",type=int,default=100) #scale --gwas-low-p automatically to have no more than this number of signals reaching it; set to a very high number to disable
-parser.add_option("","--gwas-detect-no-adjust-huge",action="store_false",dest="gwas_detect_adjust_huge",default=True) #by default, --gwas-detect-power will affect the direct support and the prior calculations; enable this to keep the original huge scores but adjust detection just for prior calculations
-parser.add_option("","--learn-window",default=False,action='store_true') #learn the window function linking SNPs to genes based on empirical distances of SNPs to genes and the --closest-gene-prob
-parser.add_option("","--min-var-posterior",type=float,default=0.01) #exclude all variants with posterior below this; this uses the default parameters before detect low power
-parser.add_option("","--closest-gene-prob",type=float,default=0.7) #specify probability that closest gene is the causal gene
 #these control how the probability of a SNP to gene link is scaled, independently of how many genes there are nearby
-parser.add_option("","--no-scale-raw-closest-gene",default=True,action='store_false',dest="scale_raw_closest_gene") #scale_raw_closest_gene: set everything to have the closest gene as closest gene prob (shifting up or down as necessary) 
-parser.add_option("","--cap-raw-closest-gene",default=False,action='store_true') #cap_raw_closest_gene: set everything to have probability no greater than closest gene prob (shifting down but not up)
-parser.add_option("","--max-closest-gene-prob",type=float,default=0.9) #specify maximum probability that closest gene is the causal gene. This accounts for probability that gene might just lie very far from the window
-parser.add_option("","--max-closest-gene-dist",type=float,default=2.5e5) #the maximum distance for which we will search for the closest gene
 #these parameters control how all genes nearby a signal are scaled
-parser.add_option("","--no-cap-region-posterior",default=True,action='store_false',dest="cap_region_posterior") #ensure that the sum of gene probabilities is no more than 1
-parser.add_option("","--scale-region-posterior",default=False,action='store_true') #ensure that the sum of gene probabilities is always 1
-parser.add_option("","--phantom-region-posterior",default=False,action='store_true') #if the sum of gene probabilities is less than 1, assign the rest to a "phantom" gene that always has prior=0.05. As priors change for the other genes, they will "eat up" some of the phantom gene's assigned probability
-parser.add_option("","--allow-evidence-of-absence",default=False,action='store_true') #allow the posteriors of genes to decrease below the background if there is a lack of GWAS signals
 parser.add_option("","--correct-betas-mean",default=None,action='store_true',dest="correct_betas_mean") #don't correct gene set variables (mean Z) for confounding variables (which still may exist even if all genes are corrected)
 parser.add_option("","--no-correct-betas-mean",default=None,action='store_false',dest="correct_betas_mean") #don't correct gene set variables (mean Z) for confounding variables (which still may exist even if all genes are corrected)
-parser.add_option("","--correct-betas-var",default=False,action='store_true',dest="correct_betas_var") #don't correct gene set variables (var Z) for confounding variables (which still may exist even if all genes are corrected)
 
-parser.add_option("","--min-n-ratio",type=float,default=0.5) #ignore SNPs with sample size less than this ratio of the max
-parser.add_option("","--max-clump-ld",type=float,default=0.5) #maximum ld threshold to use for clumping (when MAF is passed in)
-parser.add_option("","--signal-window-size",type=float,default=250000) #window size to initially include variants in a signal
-parser.add_option("","--signal-min-sep",type=float,default=100000) #extend the region until the distance to the last significant snp is greater than the signal_min_sep
-parser.add_option("","--signal-max-logp-ratio",type=float,default=None) #ignore all variants that are this ratio below max in signal
 
 #sampling parameters
 parser.add_option("","--max-num-burn-in",type=int,default=None) #maximum number of burn in iterations to run (defaults to ceil(0.8 * --max-num-iter) for outer Gibbs)
@@ -398,8 +272,6 @@ parser.add_option("","--max-num-burn-in",type=int,default=None) #maximum number 
 #sparsity parameters
 parser.add_option("","--sparse-solution",default=None,action="store_true",dest="sparse_solution") #zero out betas with small p_bar
 parser.add_option("","--no-sparse-solution",default=None,action="store_false",dest="sparse_solution") #zero out betas with small p_bar
-parser.add_option("","--sparse-frac-gibbs",default=0.01,type=float) #zero out betas with with values below this fraction of the top; within the gibbs loop
-parser.add_option("","--sparse-max-gibbs",default=0.001,type=float) #zero out betas with with values below this value; within the gibbs loop. Applies whether or not sparse-solution is set
 parser.add_option("","--sparse-frac-betas",default=None,type=float) #zero out betas with with values below this fraction of the top, within each beta_tilde->beta calculation (within gibbs and prior to it). Only applied if sparse-solution is set
 
 #priors parameters
@@ -407,12 +279,10 @@ parser.add_option("","--adjust-priors",default=None,action='store_true',dest="ad
 parser.add_option("","--no-adjust-priors",default=None,action='store_false',dest="adjust_priors") #do not correct priors for the number of gene sets a gene is in")
 
 #gibbs parameters
-parser.add_option("","--no-update-huge-scores",default=True,action='store_false',dest="update_huge_scores") #do not use priors to update huge scores (by default, priors affect "competition" for signal by nearby genes")
-parser.add_option("","--top-gene-prior",type=float,default=None) #specify the top prior we are expecting any of the genes to have (after all of the calculations)
-parser.add_option("","--increase-hyper-if-betas-below",type=float,default=None) #increase p if gene sets aren't significant enough
 
 #factor parameters
 parser.add_option("","--lmm-auth-key",default=None,type=str) #pass authorization key to enable LLM cluster labelling
+parser.add_option("","--lmm-provider",default="openai",type=str) #LLM provider for labeling: openai (implemented), gemini/claude (reserved)
 parser.add_option("","--lmm-model",default="gpt-4o-mini",type=str) #choose model
 parser.add_option("","--label-gene-sets-only",default=False,action="store_true") #use only gene sets (rather than genes and gene sets) for label
 parser.add_option("","--label-include-phenos",default=False,action="store_true") #add phenos to the labels (if --label-gene-sets-only is specified, the labelling will use just gene sets and phenos but skip genes). When doing phenotype based factoring, this (confusingly) adds genes rather than phenos, since phenotypes are the default thing used to label
@@ -515,57 +385,8 @@ parser.add_option("","--add-gene-sets-by-naive",type="float",default=None) #when
 parser.add_option("","--add-gene-sets-by-gibbs",type="float",default=None) #when running multiple gene anchoring, add in gene sets with beta_uncorrected above this threshold after gibbs
 
 #simulation parameters
-parser.add_option("","--sim-log-bf-noise-sigma-mult",type=float,default=0) #noise to add to simulations (in standard devs)
-parser.add_option("","--sim-only-positive",action="store_true") #only simulate positive betas
 
-#gibbs sampling parameters
-parser.add_option("","--num-mad",type=int,default=10) #number of median absolute devs above which to treat chains as outliers
-parser.add_option("","--min-num-burn-in",type=int,default=10) #minimum number of burn-in iterations per outer Gibbs epoch
-parser.add_option("","--min-num-post-burn-in",type=int,dest="min_num_post_burn_in",default=None) #minimum number of post-burn-in iterations per outer Gibbs epoch
-parser.add_option("","--max-num-post-burn-in",type=int,dest="max_num_post_burn_in",default=None) #maximum number of post-burn-in iterations per outer Gibbs epoch
-parser.add_option("","--min-num-iter",type=int,default=10) #deprecated alias for --min-num-post-burn-in
-parser.add_option("","--max-num-iter",type=int,default=500) #legacy per-epoch total outer Gibbs cap (post+burn); used as fallback if phase-specific bounds are not set
-parser.add_option("","--total-num-iter-gibbs",type=int,default=None) #total outer Gibbs iterations budget across all restart epochs; defaults to --max-num-iter
-parser.add_option("","--r-threshold-burn-in",type=float,default=1.10) #R-hat threshold for outer Gibbs burn-in
-parser.add_option("","--gauss-seidel",action="store_true") #run gauss seidel for gibbs sampling
-parser.add_option("","--use-sampled-betas-in-gibbs",action="store_true") #use a sample of the betas returned from the inner beta sampling within the gibbs samples; by default uses mean value which is smoother (more stable but more prone to not exploring full space)
-parser.add_option("","--warm-start",action="store_true",dest="warm_start",default=True) #within gibbs, initialize corrected beta sampling from previous iteration values (default on)
-parser.add_option("","--no-warm-start",action="store_false",dest="warm_start") #disable warm-starting in outer gibbs
-
-# Primary precision controls.
-parser.add_option("","--max-abs-mcse-d",type=float,default=None) #maximum allowed absolute MCSE on posterior D
-parser.add_option("","--max-rel-mcse-beta",type=float,default=None) #maximum allowed relative MCSE on active betas
 parser.add_option("","--num-chains",type=int,default=10) #number of chains for gibbs sampling. Larger number uses more memory and compute but produces lower MCSE
-parser.add_option("","--max-num-restarts",type=int,default=10) #maximum number of additional Gibbs restart epochs to run and aggregate. Larger numbers increasing likelihood of reaching MCSE
-
-# Secondary precision controls.
-parser.add_option("","--stall-min-post-burn-samples",type=int,dest="stall_min_post_burn_in",default=50) #minimum post-burn-in samples before applying stall detectors
-parser.add_option("","--stall-min-post-burn-in",type=int,dest="stall_min_post_burn_in",default=50) #deprecated alias for --stall-min-post-burn-samples
-parser.add_option("","--stop-mcse-quantile",type=float,default=None) #use this quantile for MCSE-based stopping metrics
-parser.add_option("","--stop-patience",type=int,default=2) #require this many consecutive stopping passes
-
-# Tertiary controls (monitoring set definitions and burn-in/stall mechanics).
-parser.add_option("","--strict-stopping",action="store_true",default=False) #switch outer Gibbs burn-in/stopping defaults from lenient to strict preset
-parser.add_option("","--use-max-r-for-convergence",action="store_true") #for burn-in, use max beta R-hat (q=1.0) instead of --burn-in-rhat-quantile
-parser.add_option("","--burn-in-rhat-quantile",type=float,default=0.90) #use this quantile of active beta R-hat values for burn-in completion
-parser.add_option("","--burn-in-patience",type=int,default=2) #require this many consecutive burn-in passes
-parser.add_option("","--burn-in-post-reserve",type=int,dest="min_num_post_burn_in",default=None) #deprecated alias for --min-num-post-burn-in
-parser.add_option("","--min-post-burn-in",type=int,dest="min_num_post_burn_in",default=None) #deprecated alias for --min-num-post-burn-in
-parser.add_option("","--burn-in-stall-window",type=int,default=3) #if burn-in R-hat quantile fails to improve over this many diagnostics, stop burn-in
-parser.add_option("","--burn-in-stall-delta",type=float,default=0.01) #minimum R-hat quantile improvement over burn-in stall window
-parser.add_option("","--active-beta-top-k",type=int,default=200) #monitor this many top |beta| gene sets for diagnostics
-parser.add_option("","--active-beta-min-abs",type=float,default=0.005) #minimum |beta| for active-beta diagnostic set
-parser.add_option("","--stop-top-gene-k",type=int,default=200) #number of top genes by posterior D to monitor for MCSE
-parser.add_option("","--stop-min-gene-d",type=float,default=0.30) #minimum posterior D for genes to be eligible for stop-top-gene-k monitoring; falls back to top-k if none pass
-parser.add_option("","--beta-rel-mcse-denom-floor",type=float,default=0.10) #floor for denominator when computing beta relative MCSE
-parser.add_option("","--stall-window",type=int,default=3) #number of diagnostic checkpoints in the stall plateau window
-parser.add_option("","--stall-min-burn-in",type=int,default=10) #minimum burn-in iterations before applying stall detection
-parser.add_option("","--stall-delta-rhat",type=float,default=0.01) #minimum best-so-far R-hat improvement required over stall-window checkpoints
-parser.add_option("","--stall-delta-mcse",type=float,default=0.002) #minimum best-so-far D MCSE improvement required over stall-window checkpoints
-parser.add_option("","--stall-recent-window",type=int,default=4) #number of diagnostic checkpoints for recent-vs-full stall check
-parser.add_option("","--stall-recent-eps",type=float,default=0.05) #fractional tolerance for recent-vs-full stall check
-parser.add_option("","--disable-stall-detection",action="store_true",default=False) #disable stall detectors; force one epoch by setting --max-num-restarts 0 and --total-num-iter-gibbs --max-num-iter
-parser.add_option("","--diag-every",type=int,default=4) #run and print full Gibbs diagnostics every N iterations
 
 #beta sampling parameters
 parser.add_option("","--min-num-iter-betas",type=int,default=10) #minimum number of iterations to run for beta sampling
@@ -579,11 +400,9 @@ parser.add_option("","--use-max-r-for-convergence-betas",action="store_true") #u
 
 #TEMP DEBUGGING FLAGS
 parser.add_option("","--debug-old-batch",action="store_true") #
-parser.add_option("","--debug-max-gene-sets-for-hyper",action="store_true") #
 parser.add_option("","--debug-skip-phewas-covs",action="store_true") #
 parser.add_option("","--debug-skip-huber",action="store_true") #
 parser.add_option("","--debug-skip-correlation",action="store_true") #
-parser.add_option("","--debug-zero-sparse",action="store_true") #
 parser.add_option("","--debug-just-check-header",action="store_true") #
 parser.add_option("","--debug-only-avg-huge",action="store_true")
 
@@ -621,56 +440,13 @@ def _collect_cli_specified_dests(_argv, _parser):
     return specified_dests
 
 def _merge_dicts(_base, _override):
-    if not isinstance(_base, dict):
-        _base = {}
-    merged = dict(_base)
-    for _k, _v in _override.items():
-        if _k in merged and isinstance(merged[_k], dict) and isinstance(_v, dict):
-            merged[_k] = _merge_dicts(merged[_k], _v)
-        else:
-            merged[_k] = _v
-    return merged
+    return pegs_merge_dicts(_base, _override)
 
 def _load_json_config(_config_path, _seen=None):
-    if _seen is None:
-        _seen = set()
-
-    abs_path = os.path.abspath(_config_path)
-    if abs_path in _seen:
-        bail("Detected circular config include at %s" % abs_path)
-    _seen.add(abs_path)
-
-    with open(abs_path) as cfg_fh:
-        cfg = json.load(cfg_fh)
-
-    if not isinstance(cfg, dict):
-        bail("Config file must contain a JSON object: %s" % abs_path)
-
-    includes = cfg.get("include")
-    if includes is None:
-        return cfg
-
-    include_list = includes if isinstance(includes, list) else [includes]
-    merged = {}
-    cfg_dir = os.path.dirname(abs_path)
-    for include_file in include_list:
-        if not isinstance(include_file, str):
-            bail("Config include entries must be strings in %s" % abs_path)
-        include_path = include_file
-        if not os.path.isabs(include_path):
-            include_path = os.path.normpath(os.path.join(cfg_dir, include_path))
-        include_cfg = _load_json_config(include_path, _seen=_seen)
-        merged = _merge_dicts(merged, include_cfg)
-
-    cfg = dict(cfg)
-    del cfg["include"]
-    return _merge_dicts(merged, cfg)
+    return pegs_load_json_config(_config_path, bail_fn=bail, seen_paths=_seen)
 
 def _is_remote_path(_value):
-    if not isinstance(_value, str):
-        return False
-    lower = _value.lower()
-    return lower.startswith("http:") or lower.startswith("https:") or lower.startswith("ftp:")
+    return pegs_is_remote_path(_value)
 
 def _is_path_like_dest(_dest):
     if _dest is None:
@@ -679,16 +455,7 @@ def _is_path_like_dest(_dest):
     return _dest_lower.endswith("_in") or _dest_lower.endswith("_out") or _dest_lower.endswith("_file") or "_file_" in _dest_lower or _dest_lower in ("log_file", "warnings_file", "config")
 
 def _resolve_config_path_value(_value, _config_dir):
-    if not isinstance(_value, str):
-        return _value
-    if _value == "":
-        return _value
-    if _is_remote_path(_value):
-        return _value
-    expanded = os.path.expanduser(_value)
-    if os.path.isabs(expanded):
-        return os.path.normpath(expanded)
-    return os.path.normpath(os.path.join(_config_dir, expanded))
+    return pegs_resolve_config_path_value(_value, _config_dir)
 
 def _coerce_config_value(_opt, _value):
     def _cast_scalar(_scalar):
@@ -807,19 +574,7 @@ def _apply_config_overrides(_options, _args, _parser, _argv):
     return _options, _args, config_mode
 
 def _json_safe(_value):
-    if isinstance(_value, np.generic):
-        return _value.item()
-    if isinstance(_value, np.ndarray):
-        return [_json_safe(x) for x in _value.tolist()]
-    if isinstance(_value, set):
-        return [_json_safe(x) for x in sorted(_value)]
-    if isinstance(_value, tuple):
-        return [_json_safe(x) for x in _value]
-    if isinstance(_value, list):
-        return [_json_safe(x) for x in _value]
-    if isinstance(_value, dict):
-        return {str(k): _json_safe(v) for k, v in _value.items()}
-    return _value
+    return pegs_json_safe(_value)
 
 REMOVED_OPTION_REPLACEMENTS = {
     "gene_bfs_in": "--gene-stats-in",
@@ -1200,6 +955,65 @@ def warn(message):
         warnings_fh.flush()
     log(message, level=INFO)
 
+
+def _query_openai_chat_completion(query, auth_key=None, lmm_model=None):
+    if auth_key is None:
+        bail("Need --lmm-auth-key to use LLM labeling")
+
+    model = lmm_model if lmm_model is not None else "gpt-4o-mini"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": query}],
+        "temperature": 0,
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer %s" % auth_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response_fh:
+            response_payload = json.loads(response_fh.read().decode("utf-8"))
+        choices = response_payload.get("choices", [])
+        if len(choices) == 0:
+            warn("OpenAI response missing choices; skipping LLM labels")
+            return None
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if content is None:
+            warn("OpenAI response missing message content; skipping LLM labels")
+            return None
+        return content
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = str(e)
+        warn("OpenAI labeling request failed: HTTP %s %s" % (e.code, body))
+        return None
+    except urllib.error.URLError as e:
+        warn("OpenAI labeling request failed: %s" % e)
+        return None
+    except Exception as e:
+        warn("OpenAI labeling request failed: %s" % e)
+        return None
+
+
+def query_lmm(query, auth_key=None, lmm_model=None, lmm_provider="openai"):
+    provider = (lmm_provider if lmm_provider is not None else "openai").strip().lower()
+    if provider == "openai":
+        return _query_openai_chat_completion(query, auth_key=auth_key, lmm_model=lmm_model)
+    if provider == "gemini":
+        bail("LLM provider 'gemini' is not implemented yet; use --lmm-provider openai")
+    if provider == "claude":
+        bail("LLM provider 'claude' is not implemented yet; use --lmm-provider openai")
+    bail("Unsupported --lmm-provider '%s'; expected one of: openai, gemini, claude" % provider)
+
+
 eaggl_bundle_info = _apply_eaggl_bundle_inputs(options)
 if eaggl_bundle_info is not None:
     applied = eaggl_bundle_info.get("applied_defaults", {})
@@ -1216,14 +1030,6 @@ if options.seed is not None:
     np.random.seed(options.seed)
     log("Using deterministic random seed %d" % options.seed, INFO)
 
-if "--min-post-burn-in" in sys.argv:
-    warn("Flag --min-post-burn-in is deprecated; use --min-num-post-burn-in instead")
-if "--burn-in-post-reserve" in sys.argv:
-    warn("Flag --burn-in-post-reserve is deprecated; use --min-num-post-burn-in instead")
-if "--stall-min-post-burn-in" in sys.argv:
-    warn("Flag --stall-min-post-burn-in is deprecated; use --stall-min-post-burn-samples instead")
-
-
 try:
     options.x_sparsify = [int(x) for x in options.x_sparsify]
 except ValueError:
@@ -1235,17 +1041,10 @@ if len(args) < 1:
 mode = args[0]
 _enforce_eaggl_mode_ownership(mode)
 
-run_huge = False
-run_beta_tilde = False
-run_beta = False
-run_priors = False
-run_naive_priors = False
-run_gibbs = False
 run_factor = False
 run_phewas = False
 
 run_naive_factor = False
-run_sim = False
 use_phewas_for_factoring = False
 factor_gene_set_x_pheno = False
 expand_gene_sets = False
@@ -1306,42 +1105,8 @@ if run_factor and factor_gene_set_x_pheno is not None:
     if options.add_gene_sets_by_enrichment_p is not None:
         options.filter_gene_set_p = options.add_gene_sets_by_enrichment_p
 
-options.cross_val = options.cross_val if options.cross_val is not None else False
 options.sparse_frac_betas = options.sparse_frac_betas if options.sparse_frac_betas is not None else 0.001
 options.sparse_solution = options.sparse_solution if options.sparse_solution is not None else True
-
-gibbs_stopping_presets = {
-    "lenient": {
-        "stop_mcse_quantile": 0.90,
-        "max_rel_mcse_beta": 0.20,
-        "max_abs_mcse_d": 0.10,
-    },
-    "strict": {
-        "stop_mcse_quantile": 0.95,
-        "max_rel_mcse_beta": 0.05,
-        "max_abs_mcse_d": 0.03,
-    },
-}
-
-options.gibbs_stopping_preset = "strict" if options.strict_stopping else "lenient"
-for opt_name, opt_value in gibbs_stopping_presets[options.gibbs_stopping_preset].items():
-    if getattr(options, opt_name) is None:
-        setattr(options, opt_name, opt_value)
-
-# Backward-compat defaults/aliases for simplified epoch controls.
-if options.min_num_post_burn_in is None:
-    options.min_num_post_burn_in = options.min_num_iter
-if options.max_num_post_burn_in is None and options.max_num_iter is not None:
-    options.max_num_post_burn_in = max(1, options.max_num_iter - max(options.min_num_burn_in, 0))
-
-# Explicitly disable all stall-based early exits/restarts.
-if options.disable_stall_detection:
-    options.burn_in_stall_window = 0
-    options.stall_window = 0
-    options.stall_recent_window = 0
-    # Emulate legacy single-epoch behavior: no restarts and one total Gibbs budget.
-    options.max_num_restarts = 0
-    options.total_num_iter_gibbs = options.max_num_iter
 
 def _flag_present(*flag_names):
     for arg in sys.argv[1:]:
@@ -1584,7 +1349,7 @@ def open_gz(file, flag=None):
 
     return fh
 
-class GeneSetData(object):
+class EagglState(object):
     '''
     Stores gene and gene set annotations and derived matrices
     It allows reading X or V files and using these to determine the allowed gene sets and genes
@@ -2073,63 +1838,6 @@ class GeneSetData(object):
                 else:
                     gene_label_map[orig_gene] = new_gene
         return gene_label_map
-
-    def remove_genes_for_phewas_factor(self, keep_genes=None, naive_gt=None, num_gt=None, num_top_per_factor=None, num_top=None):
-        if self.genes is None:
-            return
-
-        keep_genes_mask = np.full(len(self.genes), False)
-        if keep_genes is not None:
-            keep_genes_mask = np.array([x in keep_genes for x in self.genes])
-
-        gene_mask = np.full(len(self.genes), True)
-
-        if naive_gt is not None and self.priors is not None:
-            gene_mask = np.logical_and(gene_mask, self.priors > naive_gt)
-        if num_gt is not None and self.X_orig is not None:
-            gene_mask = np.logical_and(gene_mask, self.X_orig.sum(axis=1).A1 > num_gt)
-
-        if np.sum(gene_mask) != len(gene_mask):
-            gene_mask = np.logical_or(gene_mask, keep_genes_mask)
-
-            log("Removing %d genes (kept %d) due to requested filters" % (len(gene_mask) - np.sum(gene_mask), np.sum(gene_mask)), DEBUG)
-            self._subset_genes(gene_mask, skip_V=True, overwrite_missing=True, skip_scale_factors=False)
-            keep_genes_mask = keep_genes_mask[gene_mask]
-
-        if num_top_per_factor is not None and self.exp_gene_factors is not None and self.exp_gene_factors.shape[1] > 0 and num_top_per_factor < len(self.genes):
-
-            gene_mask = np.full(len(self.genes), False)
-            num_bottom = len(self.genes) - num_top_per_factor
-
-            highest_row_indices_per_column = np.argpartition(self.exp_gene_factors, num_bottom, axis=0)[-num_top_per_factor:,:]
-            gene_mask[np.unique(highest_row_indices_per_column)] = True
-
-            if np.sum(gene_mask) != len(gene_mask):
-                gene_mask = np.logical_or(gene_mask, keep_genes_mask)
-                log("Removing %d genes (kept %d) due to requested number of top per factor" % (len(gene_mask) - np.sum(gene_mask), np.sum(gene_mask)), DEBUG)
-                self._subset_genes(gene_mask, skip_V=True, overwrite_missing=True, skip_scale_factors=False)
-                keep_genes_mask = keep_genes_mask[gene_mask]
-
-        if num_top is not None and num_top < len(self.genes):
-            values_for_top = self.X_orig.sum(axis=1).A1
-            if self.exp_gene_factors is not None:
-                values_for_top = np.max(self.exp_gene_factors, axis=1)
-            elif naive_gt is not None and self.priors is not None:
-                values_for_top = self.priors
-
-            gene_mask = np.full(len(self.genes), False)
-            num_bottom = len(self.genes) - num_top
-
-            gene_mask[np.argpartition(values_for_top, num_bottom)[-num_top:]] = True
-            log("Removing %d genes (kept %d) due to requested number of top" % (len(gene_mask) - np.sum(gene_mask), np.sum(gene_mask)), DEBUG)
-            gene_mask = np.logical_or(gene_mask, keep_genes_mask)
-            self._subset_genes(gene_mask, skip_V=True, overwrite_missing=True, skip_scale_factors=False)
-            keep_genes_mask = keep_genes_mask[gene_mask]
-
-
-    def set_const_Y(self, value):
-        const_Y = np.full(len(self.genes), value)
-        self._set_Y(const_Y, const_Y, None, None, None, skip_V=True, skip_scale_factors=True)
 
     def read_Y(self, gwas_in=None, huge_statistics_in=None, huge_statistics_out=None, exomes_in=None, positive_controls_in=None, positive_controls_list=None, case_counts_in=None, ctrl_counts_in=None, gene_bfs_in=None, gene_loc_file=None, gene_covs_in=None, hold_out_chrom=None, **kwargs):
 
@@ -4187,80 +3895,6 @@ class GeneSetData(object):
 
     #this reads a V matrix directly from a file
     #it does not initialize an X matrix; if the X-matrix is needed, read_X should be used instead
-    def read_V(self, V_in):
-
-        log("Reading V from --V-in file %s" % V_in, INFO)
-        with open(V_in) as V_fh:
-            header = V_fh.readline().strip('\n')
-        if len(header) == 0 or header[0] != "#":
-            bail("First line of --V-in must be proceeded by #")
-        header = header.lstrip("# \t")
-        gene_sets = header.split()
-        if len(gene_sets) < 1:
-            bail("First line of --X-in must contain list of gene sets")
-
-        gene_set_to_ind = self._construct_map_to_ind(gene_sets)
-        V = np.genfromtxt(V_in, skip_header=1)
-        if V.shape[0] != V.shape[1] or V.shape[0] != len(gene_sets):
-            bail("V matrix dimensions %s do not match number of gene sets in header line (%s)" % (V.shape, len(gene_sets)))
-
-        if self.gene_sets is None:
-            self.gene_sets = gene_sets
-            self.gene_set_to_ind = gene_set_to_ind
-        else:
-            #first remove everything from V that is not in gene sets previously
-            subset_mask = np.array([(x in self.gene_set_to_ind) for x in gene_sets])
-            if sum(subset_mask) != len(subset_mask):
-                warn("Excluding %s values from previously loaded files because absent from --V-in file" % (len(subset_mask) - sum(subset_mask)))
-                V = V[subset_mask,:][:,subset_mask]
-                self.gene_sets = list(itertools.compress(self.gene_sets, subset_mask))
-                self.gene_set_to_ind = self._construct_map_to_ind(self.gene_sets)
-            #now remove everything from the other files that are not in V
-            old_subset_mask = np.array([(x in gene_set_to_ind) for x in self.gene_sets])
-            if sum(old_subset_mask) != len(old_subset_mask):
-                warn("Excluding %s values from --V-in file because absent from previously loaded files" % (len(old_subset_mask) - sum(old_subset_mask)))
-                self.subset_gene_sets(old_subset_mask, keep_missing=False, skip_V=True)
-        return V
-
-
-    def write_V(self, V_out):
-        if self.X_orig is not None:
-            V = self._get_V()
-            log("Writing V matrix to %s" % V_out, INFO)
-            np.savetxt(V_out, V, delimiter='\t', fmt="%.2g", comments="#", header="%s" % ("\t".join(self.gene_sets)))
-        else:
-            warn("V has not been initialized; skipping writing")
-
-    def write_Xd(self, X_out):
-        if self.X_orig is not None:
-            log("Writing X matrix to %s" % X_out, INFO)
-            #FIXME: get_orig_X
-            np.savetxt(X_out, self.X_orig.toarray(), delimiter='\t', fmt="%.3g", comments="#", header="%s" % ("%s\n#%s" % ("\t".join(self.gene_sets), "\t".join(self.genes))))
-        else:
-            warn("X has not been initialized; skipping writing")
-
-    def write_X(self, X_out):
-        if self.genes is None or self.X_orig is None or self.gene_sets is None:
-            return
-            warn("X has not been initialized; skipping writing")
-            return
-
-        log("Writing X sparse matrix to %s" % X_out, INFO)
-
-        with open_gz(X_out, 'w') as output_fh:
-
-            for j in range(len(self.gene_sets)):
-                line = self.gene_sets[j]
-                nonzero_inds = self.X_orig[:,j].nonzero()[0]
-                non_unity = np.sum(self.X_orig[nonzero_inds,j] == 1) < len(nonzero_inds)
-                for i in nonzero_inds:
-                    if non_unity:
-                        line = "%s\t%s:%.2g" % (line, self.genes[i], self.X_orig[i,j])
-                    else:
-                        line = "%s\t%s" % (line, self.genes[i])
-
-                output_fh.write("%s\n" % line)
-
     def calculate_huge_scores_gwas(self, gwas_in, gwas_chrom_col=None, gwas_pos_col=None, gwas_p_col=None, gene_loc_file=None, hold_out_chrom=None, exons_loc_file=None, gwas_beta_col=None, gwas_se_col=None, gwas_n_col=None, gwas_n=None, gwas_freq_col=None, gwas_filter_col=None, gwas_filter_value=None, gwas_locus_col=None, gwas_ignore_p_threshold=None, gwas_units=None, gwas_low_p=5e-8, gwas_high_p=1e-2, gwas_low_p_posterior=0.98, gwas_high_p_posterior=0.001, detect_low_power=None, detect_high_power=None, detect_adjust_huge=False, learn_window=False, closest_gene_prob=0.7, max_closest_gene_prob=0.9, scale_raw_closest_gene=True, cap_raw_closest_gene=False, cap_region_posterior=True, scale_region_posterior=False, phantom_region_posterior=False, allow_evidence_of_absence=False, correct_huge=True, max_signal_p=1e-5, signal_window_size=250000, signal_min_sep=100000, signal_max_logp_ratio=None, credible_set_span=25000, max_closest_gene_dist=2.5e5, min_n_ratio=0.5, max_clump_ld=0.2, min_var_posterior=0.01, s2g_in=None, s2g_chrom_col=None, s2g_pos_col=None, s2g_gene_col=None, s2g_prob_col=None, s2g_normalize_values=None, credible_sets_in=None, credible_sets_id_col=None, credible_sets_chrom_col=None, credible_sets_pos_col=None, credible_sets_ppa_col=None, **kwargs):
         if gwas_in is None:
             bail("Require --gwas-in for this operation")
@@ -6752,60 +6386,6 @@ class GeneSetData(object):
 
         return (positive_controls, extra_genes, np.array(extra_positive_controls))
 
-    def read_all_genes(self, all_genes_in=None, all_genes_id_col=None, all_genes_has_header=True, hold_out_chrom=None, gene_loc_file=None, **kwargs):
-        if all_genes_in is None:
-            bail("Require --all-genes-in")
-
-        if hold_out_chrom is not None and self.gene_to_chrom is None:
-            (self.gene_chrom_name_pos, self.gene_to_chrom, self.gene_to_pos) = self._read_loc_file(gene_loc_file)
-
-        all_genes = []
-        with open_gz(all_genes_in) as all_genes_fh:
-            id_col = 0
-            seen_header = False
-            for line in all_genes_fh:
-                cols = line.strip('\n').split()
-                if not seen_header:
-                    seen_header = True
-                    if all_genes_has_header or len(cols) > 1:
-                        if len(cols) > 1 and all_genes_id_col is None:
-                            bail("--all-genes-id-col required for positive control files with more than one column")
-                        elif all_genes_id_col is not None:
-                            id_col = self._get_col(all_genes_id_col, cols)
-
-                        if all_genes_has_header and all_genes_id_col is not None:
-                            continue
-
-                if id_col >= len(cols):
-                    warn("Skipping due to too few columns in line: %s" % line)
-                    continue
-
-                gene = cols[id_col]
-
-                if self.gene_label_map is not None and gene in self.gene_label_map:
-                    gene = self.gene_label_map[gene]
-
-                if hold_out_chrom is not None and gene in self.gene_to_chrom and self.gene_to_chrom[gene] == hold_out_chrom:
-                    continue
-
-                all_genes.append(gene)
-
-        if self.genes is not None:
-            genes = self.genes
-            gene_to_ind = self.gene_to_ind
-        else:
-            genes = []
-            gene_to_ind = {}
-
-        for gene in all_genes:
-            if gene not in gene_to_ind:
-                gene_to_ind[gene] = len(genes)
-                genes.append(gene)
-
-        self._set_X(None, genes, None, skip_N=True)
-
-
-    #written by o3
     def read_count_file(self, case_counts_in, ctrl_counts_in, min_revels=None, mean_rrs=None, case_counts_gene_col=None, ctrl_counts_gene_col=None, case_counts_revel_col=None, ctrl_counts_revel_col=None, case_counts_count_col=None, ctrl_counts_count_col=None, case_counts_tot_col=None, ctrl_counts_tot_col=None, case_counts_max_freq_col=None, ctrl_counts_max_freq_col=None, max_case_freq=0.001, max_ctrl_freq=0.001, syn_revel_threshold=0, syn_fisher_p=1e-4, nu=1, beta=1.0, hold_out_chrom=None, gene_loc_file=None, bound_zero=True, **kwargs):
 
         if hold_out_chrom is not None and self.gene_to_chrom is None:
@@ -8008,185 +7588,6 @@ class GeneSetData(object):
                 bail("Couldn't find any match for %s" % list(anchor_phenos))
 
 
-    def calculate_gene_set_statistics(self, gwas_in=None, exomes_in=None, positive_controls_in=None, positive_controls_list=None, case_counts_in=None, ctrl_counts_in=None, gene_bfs_in=None, Y=None, show_progress=True, max_gene_set_p=None, run_gls=False, run_logistic=True, max_for_linear=0.95, run_corrected_ols=False, use_sampling_for_betas=None, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, skip_V=False, run_using_phewas=False, **kwargs):
-        if self.X_orig is None:
-            bail("Error: X is required")
-        #now calculate the betas and p-values
-
-        log("Calculating gene set statistics", INFO)
-
-        if run_using_phewas:
-            Y = self.gene_pheno_Y.T.toarray()
-            if Y is None:
-                bail("Need --gene-phewas-bfs in order to run beta calculation with phewas")
-
-        if Y is None:
-            Y = self.Y_for_regression
-
-        if Y is None:
-            if gwas_in is None and exomes_in is None and gene_bfs_in is None and positive_controls_in is None and positive_controls_list is None and case_counts_in is None and ctrl_counts_in is None:
-                bail("Need --gwas-in or --exomes-in or --gene-stats-in or --positive-controls-in or --case-counts_in")
-
-            log("Reading Y within calculate_gene_set_statistics; parameters may not be honored")
-            self.read_Y(gwas_in=gwas_in, exomes_in=exomes_in, positive_controls_in=positive_controls_in, positive_controls_list=positive_controls_list, case_counts_in=case_counts_in, ctrl_counts_in=ctrl_counts_in, gene_bfs_in=gene_bfs_in, **kwargs)
-            Y = self.Y_for_regression
-
-        #FIXME: need to make this so don't always read in correlations, and add priors where needed
-        #can move this inside of the Y is None loop
-        #but -- if compute correlation distance function is true and gene_cor_file is none and gene_loc file is not None, then we need to redo this
-        #and: if gene_cor_file is not none, then we need to update the correlation matrix to account for the priors
-        #To decrease correlation, we first convert cor to covaraince (multiply by np.var(Y)) then divide by np.var(Y) + np.var(prior). For np.sd prior, we can either use a fixed value (the sd of priors across all genes) or we can use the actual y values (and thus do np.sqrt(np.var(Y) + prior1)np.sqrt(np.var(Y) + prior2).
-        #and, finally: we always need to call set Y here
-        if run_gls:
-            run_corrected_ols = False
-
-        if (run_gls or run_corrected_ols) and self.y_corr is None:
-            correlation_m = self._read_correlations(gene_cor_file, gene_loc_file, gene_cor_file_gene_col=gene_cor_file_gene_col, gene_cor_file_cor_start_col=gene_cor_file_cor_start_col)
-
-            #convert X and Y to their new values
-            min_correlation = 0.05
-            self._set_Y(self.Y, self.Y_for_regression, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts, Y_corr_m=correlation_m, store_cholesky=run_gls, store_corr_sparse=run_corrected_ols, skip_V=True, skip_scale_factors=True, min_correlation=min_correlation)
-
-        #subset gene sets to remove empty ones first
-        #number of gene sets in each gene set
-        col_sums = self.get_col_sums(self.X_orig, num_nonzero=True)
-        self.subset_gene_sets(col_sums > 0, keep_missing=False, skip_V=True, skip_scale_factors=True)
-
-        #CAN REMOVE
-        #mean of Y is now zero
-        #self.beta_tildes = self.scale_factors * ((self.X_orig.T.dot(Y_clean) / len(Y_clean)) - (self.mean_shifts * np.mean(Y_clean))) / variances
-        self._set_scale_factors()
-
-        #self.is_logistic = run_logistic
-
-        #if the maximum Y is large, switch to logistic regression (to avoid being too strong)
-        Y_to_use = Y
-        Y = np.exp(Y_to_use + self.background_log_bf) / (1 + np.exp(Y_to_use + self.background_log_bf))
-
-        if not run_logistic and np.max(Y) > max_for_linear and (use_sampling_for_betas is None or use_sampling_for_betas < 1):
-            log("Switching to logistic sampling due to high Y values", DEBUG)
-            run_logistic = True
-            use_sampling_for_betas = 1
-
-        if use_sampling_for_betas is not None:
-            self._record_param("sampling_for_betas", use_sampling_for_betas)
-
-        if use_sampling_for_betas is not None and use_sampling_for_betas > 0:
-
-            #handy option in case we want to see what sampling looks like outside of gibbs
-            if run_using_phewas:
-                avg_beta_tildes = np.zeros((self.gene_pheno_Y.shape[1],len(self.gene_sets)))
-                avg_z_scores = np.zeros((self.gene_pheno_Y.shape[1],len(self.gene_sets)))
-            else:
-                avg_beta_tildes = np.zeros(len(self.gene_sets))
-                avg_z_scores = np.zeros(len(self.gene_sets))
-            tot_its = 0
-            for iteration_num in range(use_sampling_for_betas):
-                log("Sampling iteration %d..." % (iteration_num+1))
-                p_sample_m = np.zeros(Y.shape)
-                p_sample_m[np.random.random(Y.shape) < Y] = 1
-                Y_sample_m = p_sample_m
-
-                (beta_tildes, ses, z_scores, p_values, se_inflation_factors, alpha_tildes, diverged) = self._compute_logistic_beta_tildes(self.X_orig, Y_sample_m, self.scale_factors, self.mean_shifts, resid_correlation_matrix=self.y_corr_sparse)
-
-                avg_beta_tildes += beta_tildes
-                avg_z_scores += z_scores
-                tot_its += 1
-
-            beta_tildes = avg_beta_tildes / tot_its
-
-            z_scores = avg_z_scores / tot_its
-
-            p_values = 2*scipy.stats.norm.cdf(-np.abs(z_scores))
-            ses = np.full(beta_tildes.shape, 100.0)
-            ses[z_scores != 0] = np.abs(beta_tildes[z_scores != 0] / z_scores[z_scores != 0])
-
-            se_inflation_factors = None
-
-        elif run_logistic:
-            (beta_tildes, ses, z_scores, p_values, se_inflation_factors, alpha_tildes, diverged) = self._compute_logistic_beta_tildes(self.X_orig, Y, self.scale_factors, self.mean_shifts, resid_correlation_matrix=self.y_corr_sparse)
-
-        else:
-            if run_gls:
-                #Y has already been whitened
-                #dot_product = np.array([])
-                y_var = self.y_fw_var
-                Y = self.Y_fw
-                #OLD CODE
-                #as an optimization, multiply original X by fully whitened Y, rather than half by half
-                #for X_b, begin, end, batch in self._get_X_blocks():
-                #    #calculate mean shifts
-                #    dot_product = np.append(dot_product, X_b.T.dot(self.Y_w) / len(self.Y_w))
-                #dot_product = self.X_orig.T.dot(self.Y_fw) / len(self.Y_fw)
-            else:
-                #Technically, we could use the above code for this case, since X_blocks will returned unwhitened matrix
-                #But, probably faster to keep sparse multiplication? Might be worth revisiting later to see if there actually is a performance gain
-                #We can use original X here because we know that whitening will occur only for GLS
-                #assert this to be sure
-                assert(not self.scale_is_for_whitened)
-                Y = copy.copy(Y)
-
-                if len(Y.shape) > 1:
-                    y_var = np.var(Y, axis=1)
-                else:
-                    y_var = np.var(Y)
-
-                #OLD CODE
-                #dot_product = self.X_orig.T.dot(self.Y) / len(self.Y)
-
-                #variances = np.power(self.scale_factors, 2)
-                #multiply by scale factors because we store beta_tilde in units of scaled X
-                #self.beta_tildes = self.scale_factors * np.array(dot_product) / variances
-                #self.ses = self.scale_factors * np.sqrt(y_var) / (np.sqrt(variances * len(self.Y)))
-                #self.z_scores = self.beta_tildes / self.ses
-                #self.p_values = 2*scipy.stats.norm.cdf(-np.abs(self.z_scores))
-
-                (beta_tildes, ses, z_scores, p_values, se_inflation_factors) = self._compute_beta_tildes(self.X_orig, Y, y_var, self.scale_factors, self.mean_shifts, resid_correlation_matrix=self.y_corr_sparse)
-
-        if correct_betas_mean or correct_betas_var:
-            (beta_tildes, ses, z_scores, p_values, se_inflation_factors) = self._correct_beta_tildes(beta_tildes, ses, se_inflation_factors, self.total_qc_metrics, self.total_qc_metrics_directions, correct_mean=correct_betas_mean, correct_var=correct_betas_var, fit=False)
-
-        if run_using_phewas:
-            (self.beta_tildes_phewas, self.z_scores_phewas, self.p_values_phewas, self.ses_phewas, self.se_inflation_factors_phewas) = (beta_tildes, z_scores, p_values, ses, se_inflation_factors)
-            if len(self.beta_tildes_phewas.shape) == 1:
-                self.beta_tildes_phewas = self.beta_tildes_phewas[np.newaxis,:]
-                self.ses_phewas = self.ses_phewas[np.newaxis,:]
-                self.z_scores_phewas = self.z_scores_phewas[np.newaxis,:]
-                self.p_values_phewas = self.p_values_phewas[np.newaxis,:]
-                if self.se_inflation_factors_phewas is not None:
-                    self.se_inflation_factors_phewas = self.se_inflation_factors_phewas[np.newaxis,:]
-        else:
-            (self.beta_tildes, self.z_scores, self.p_values, self.ses, self.se_inflation_factors) = (beta_tildes, z_scores, p_values, ses, se_inflation_factors)
-
-            self.X_orig_missing_gene_sets = None
-            self.mean_shifts_missing = None
-            self.scale_factors_missing = None
-            self.is_dense_gene_set_missing = None
-            self.ps_missing = None
-            self.sigma2s_missing = None
-
-            self.beta_tildes_missing = None
-            self.p_values_missing = None
-            self.ses_missing = None
-            self.z_scores_missing = None
-
-            self.total_qc_metrics_missing = None
-            self.mean_qc_metrics_missing = None
-
-            if max_gene_set_p is not None:
-                gene_set_mask = self.p_values <= max_gene_set_p
-                if np.sum(gene_set_mask) == 0 and len(self.p_values) > 0:
-                    gene_set_mask = self.p_values == np.min(self.p_values)
-                log("Keeping %d gene sets that passed threshold of p<%.3g" % (np.sum(gene_set_mask), max_gene_set_p))
-                self.subset_gene_sets(gene_set_mask, keep_missing=True, skip_V=True)
-
-                if len(self.gene_sets) < 1:
-                    log("No gene sets left!")
-                    return
-
-        #self.max_gene_set_p = max_gene_set_p
-
-    #FIXME: Update calls to use includes_non_missing and from_osc
     def has_gene_sets(self):
         return self.X_orig is not None and self.X_orig.shape[1] > 0
 
@@ -8202,19 +7603,6 @@ class GeneSetData(object):
             if p < 0:
                 p = 0
         self.p = p
-
-    def get_sigma2(self, convert_sigma_to_external_units=False):
-        if self.sigma2 is not None and convert_sigma_to_external_units and self.sigma_power is not None:
-            if self.scale_factors is not None:
-                if self.is_dense_gene_set is not None and np.sum(~self.is_dense_gene_set) > 0:
-                    return self.sigma2 * np.mean(np.power(self.scale_factors[~self.is_dense_gene_set], self.sigma_power - 2))
-                else:
-                    return self.sigma2 * np.mean(np.power(self.scale_factors, self.sigma_power - 2))
-            else:
-                return self.sigma2 * np.power(self.MEAN_MOUSE_SCALE, self.sigma_power - 2)
-
-        else:
-            return self.sigma2
 
     def get_scaled_sigma2(self, scale_factors, sigma2, sigma_power, sigma_threshold_k=None, sigma_threshold_xo=None):
         threshold = 1
@@ -8318,2833 +7706,6 @@ class GeneSetData(object):
                     params_fh.write("%s\t%s\t%s\n" % (param, i + 1, values[i]))
                         
             params_fh.close()
-
-    def read_betas(self, betas_in):
-
-        betas_format = "<gene_set_id> <beta>"
-
-        if self.betas_in is None:
-            bail("Operation requires --beta-in\nformat: %s" % (self.betas_format))
-
-        log("Reading --betas-in file %s" % self.betas_in, INFO)
-
-        with open_gz(betas_in) as betas_fh:
-            id_col = 0
-            beta_col = 1
-
-            if self.gene_sets is not None:
-                self.betas = np.zeros(len(self.gene_sets))
-                subset_mask = np.array([False] * len(self.gene_sets))
-            else:
-                self.betas = []
-
-            gene_sets = []
-            gene_set_to_ind = {}
-
-            ignored = 0
-            for line in betas_fh:
-                cols = line.strip('\n').split()
-                if id_col > len(cols) or beta_col > len(cols):
-                    warn("Skipping due to too few columns in line: %s" % line)
-                    continue
-
-                gene_set = cols[id_col]
-                if gene_set in gene_set_to_ind:
-                    warn("Already seen gene set %s; only considering first instance" % (gene_set))
-                try:
-                    beta = float(cols[beta_col])
-                except ValueError:
-                    if not cols[beta_col] == "NA":
-                        warn("Skipping unconvertible beta value %s for gene_set %s" % (cols[beta_col], gene_set))
-                    continue
-                
-                gene_set_ind = None
-                if self.gene_sets is not None:
-                    if gene_set not in self.gene_set_to_ind:
-                        ignored += 1
-                        continue
-                    gene_set_ind = self.gene_set_to_ind[gene_set]
-                    if gene_set_ind is not None:
-                        self.betas[gene_set_ind] = beta
-                        subset_mask[gene_set_ind] = True
-                else:
-                    self.betas.append(beta)
-                    #store these in all cases to be able to check for duplicate gene sets in the input
-                    gene_set_to_ind[gene_set] = len(gene_sets)
-                    gene_sets.append(gene_set)
-
-            if self.gene_sets is not None:
-                #need to subset existing marices
-                if ignored > 0:
-                    warn("Ignored %s values from --betas-in file because absent from previously loaded files" % ignored)
-                if sum(subset_mask) != len(subset_mask):
-                    warn("Excluding %s values from previously loaded files because absent from --betas-in file" % (len(subset_mask) - sum(subset_mask)))
-                    self.subset_gene_sets(subset_mask, keep_missing=False)
-            else:
-                self.gene_sets = gene_sets
-                self.gene_set_to_ind = gene_set_to_ind
-                self.betas = np.array(self.betas).flatten()
-
-            if self.normalize_betas:
-                self.betas -= np.mean(self.betas)
-
-    def calculate_inf_betas(self, update_hyper_sigma=True, max_num_iter=20, eps=0.01):
-        #catch the "death spiral"
-        orig_sigma2 = self.sigma2
-        orig_inf_betas = None
-        significant_decrease = 0
-        total = 0
-        converged = False
-
-        V = self._get_V()
-
-        if self.y_corr_sparse is not None:
-            V_cor = self._calculate_V_internal(self.X_orig, None, self.mean_shifts, self.scale_factors, y_corr_sparse=self.y_corr_sparse)
-            V_inv = self._invert_sym_matrix(V)
-        else:
-            V_cor = None
-            V_inv = None
-
-        for i in range(max_num_iter):
-            inf_betas = self._calculate_inf_betas(V_cor=V_cor, V_inv=V_inv, se_inflation_factors=self.se_inflation_factors)
-
-            if not update_hyper_sigma:
-                break
-
-            if orig_inf_betas is None:
-                orig_inf_betas = inf_betas
-
-            h2 = inf_betas.dot(V).dot(inf_betas)
-            if self.sigma_power is not None:
-                #np.sum(sigma2 * np.square(self.scale_factors)) = h2
-                new_sigma2 = h2 / np.sum(np.power(self.scale_factors, self.sigma_power))
-            else:
-                new_sigma2 = h2 / len(inf_betas)
-            if abs(new_sigma2 - self.sigma2) / self.sigma2 < eps:
-                converged = True
-                break
-            log("Updating sigma to: %.4g" % new_sigma2, TRACE)
-
-            total += 1
-            if new_sigma2 < self.sigma2:
-                significant_decrease += 1
-            self.set_sigma(new_sigma2, self.sigma_power)
-            if new_sigma2 == 0:
-                break
-
-        #don't degrade it too much
-        if total > 0 and not converged and float(significant_decrease) / float(total) == 1:
-            log("Reverting to original sigma=%.4g due to convergence to 0" % orig_sigma2, TRACE)
-            inf_betas = orig_inf_betas
-            self.set_sigma(orig_sigma2, self.sigma_power)
-
-        if self.betas is None or self.betas is self.inf_betas:
-            self.betas = inf_betas
-
-        self.inf_betas = inf_betas
-
-        if self.gene_sets_missing is not None:
-            self.betas_missing = np.zeros(len(self.gene_sets_missing))
-            self.betas_uncorrected_missing = np.zeros(len(self.gene_sets_missing))
-            self.inf_betas_missing = np.zeros(len(self.gene_sets_missing))
-
-    def run_cross_val(self, cross_val_num_explore_each_direction, folds=4, cross_val_max_num_tries=2, p=None, max_num_burn_in=1000, max_num_iter=1100, min_num_iter=10, num_chains=4, run_logistic=True, max_for_linear=0.95, run_corrected_ols=False, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, max_frac_sem=0.01, gauss_seidel=False, sparse_solution=False, sparse_frac_betas=None, **kwargs):
-
-        log("Running cross validation", DEBUG)
-
-        if self.sigma2s is not None:
-            candidate_sigma2s = self.sigma2s
-        elif self.sigma2 is not None:
-            candidate_sigma2s = np.array(self.sigma2).reshape((1,))
-        else:
-           bail("Need to have sigma set before running cross validation")
-
-        if p is None:
-           bail("Need to have p set before running cross validation")
-        if self.X_orig is None:
-           bail("Need to have X_orig set before running cross validation")
-
-        Y_to_use = self.Y_for_regression
-        if Y_to_use is None:
-            Y_to_use = self.Y
-
-        if Y_to_use is None:
-           bail("Need to have Y set before running cross validation")
-
-        
-        D = np.exp(Y_to_use + self.background_log_bf) / (1 + np.exp(Y_to_use + self.background_log_bf))
-        if not run_logistic and np.max(D) > max_for_linear:
-            log("Switching to logistic sampling due to high Y values (max(D) = %.3g" % np.max(D), DEBUG)
-            run_logistic = True
-
-        beta_tildes_cv = np.zeros((folds, len(self.gene_sets)))
-        alpha_tildes_cv = np.zeros((folds, len(self.gene_sets)))
-        ses_cv = np.zeros((folds, len(self.gene_sets)))
-        cv_val_masks = np.full((folds, len(Y_to_use)), False)
-        for fold in range(folds):
-            cv_mask = np.arange(len(Y_to_use)) % folds != fold
-            cv_val_masks[fold,:] = ~cv_mask
-            X_to_use = self.X_orig[cv_mask,:]
-            if run_logistic:
-                Y_cv = D[cv_mask]
-                (beta_tildes_cv[fold,:], ses_cv[fold,:], _, _, _, alpha_tildes_cv[fold,:], _) = self._compute_logistic_beta_tildes(X_to_use, Y_cv, resid_correlation_matrix=self.y_corr_sparse[cv_mask,:][:,cv_mask])
-            else:
-                Y_cv = Y_to_use[cv_mask]
-                (beta_tildes_cv[fold,:], ses_cv[fold,:], _, _, _) = self._compute_beta_tildes(X_to_use, Y_cv, resid_correlation_matrix=self.y_corr_sparse[cv_mask,:][:,cv_mask])
-
-        #one parallel per sigma value to test
-        cross_val_num_explore = cross_val_num_explore_each_direction * 2 + 1
-        #for each parallel, need to do it with the different set of Y values
-        cross_val_num_explore_with_fold = cross_val_num_explore * folds
-
-        candidate_sigma2s_m = np.tile(candidate_sigma2s, cross_val_num_explore).reshape(cross_val_num_explore, candidate_sigma2s.shape[0])
-        candidate_sigma2s_m = (candidate_sigma2s_m.T * np.power(10.0, np.arange(-cross_val_num_explore_each_direction,cross_val_num_explore_each_direction+1))).T
-        orig_index = cross_val_num_explore_each_direction
-
-        for try_num in range(cross_val_max_num_tries):
-
-            log("Sigmas to try: %s" % np.mean(candidate_sigma2s_m, axis=1), TRACE)
-
-            #order of parallel is first by explore and then by fold
-
-            #repeat the candidates for each fold
-            candidate_sigma2s_m = np.tile(candidate_sigma2s_m, (folds, 1))
-
-            beta_tildes_m = np.repeat(beta_tildes_cv, cross_val_num_explore, axis=0)
-            ses_m = np.repeat(ses_cv, cross_val_num_explore, axis=0)
-            scale_factors_m = np.tile(self.scale_factors, cross_val_num_explore_with_fold).reshape(cross_val_num_explore_with_fold, len(self.scale_factors))
-            mean_shifts_m = np.tile(self.mean_shifts, cross_val_num_explore_with_fold).reshape(cross_val_num_explore_with_fold, len(self.mean_shifts))
-
-            (betas_m, postp_m) = self._calculate_non_inf_betas(initial_p=self.p, beta_tildes=beta_tildes_m, ses=ses_m, scale_factors=scale_factors_m, mean_shifts=mean_shifts_m, sigma2s=candidate_sigma2s_m, max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter, min_num_iter=min_num_iter, num_chains=num_chains, r_threshold_burn_in=r_threshold_burn_in, use_max_r_for_convergence=use_max_r_for_convergence, max_frac_sem=max_frac_sem, gauss_seidel=gauss_seidel, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, V=self._get_V(), **kwargs)
-
-            rss = np.zeros(cross_val_num_explore)
-            num_Y = 0
-            #different values for logistic and linear
-            Y_val = Y_to_use - np.mean(Y_to_use)
-
-            for fold in range(folds):
-                #result is parallel x genes
-                output_cv_mask = np.floor(np.arange(betas_m.shape[0]) / cross_val_num_explore) == fold
-                cur_pred = self.X_orig[cv_val_masks[fold,:],:].dot((betas_m[output_cv_mask,:] / self.scale_factors).T).T
-                rss += np.sum(np.square(cur_pred - Y_val[cv_val_masks[fold,:]]), axis=1)
-                num_Y += np.sum(cv_val_masks[fold,:])
-
-            rss /= num_Y
-            best_result = np.argmin(rss)
-            best_sigma2s = candidate_sigma2s_m[best_result,:]
-            log("Got RSS values: %s" % (rss), TRACE)
-            log("Best sigma is %.3g" % np.mean(best_sigma2s))
-            log("Updating sigma from %.3g to %.3g" % (self.sigma2, np.mean(best_sigma2s)))
-            if self.sigma2s is not None:
-                self.sigma2s = best_sigma2s
-                self.set_sigma(np.mean(best_sigma2s), self.sigma_power)
-            else:
-                assert(len(best_sigma2s.shape) == 1 and best_sigma2s.shape[0] == 1)
-                self.set_sigma(best_sigma2s[0], self.sigma_power)
-
-            if try_num + 1 < cross_val_max_num_tries and (best_result == 0 or best_result == (len(rss) - 1)) and best_result != orig_index:
-                log("Expanding search further since best cross validation result was at boundary of search space", DEBUG)
-                assert(self.sigma2s is not None or self.sigma2 is not None)
-                if self.sigma2s is not None:
-                    candidate_sigma2s = self.sigma2s
-                else: 
-                    candidate_sigma2s = np.array(self.sigma2).reshape((1,))
-                candidate_sigma2s_m = np.tile(candidate_sigma2s, cross_val_num_explore).reshape(cross_val_num_explore, candidate_sigma2s.shape[0])
-                if best_result == 0:
-                    #extend lower
-                    candidate_sigma2s_m = (candidate_sigma2s_m.T * np.power(10.0, np.arange(-cross_val_num_explore+1,1))).T
-                    orig_index = cross_val_num_explore - 1
-                else:
-                    #extend higher
-                    candidate_sigma2s_m = (candidate_sigma2s_m.T * np.power(10.0, np.arange(cross_val_num_explore))).T
-                    orig_index = 0
-            else:
-                break
-        
-    def calculate_non_inf_betas(self, p, max_num_burn_in=1000, max_num_iter=1100, min_num_iter=10, num_chains=10, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, max_frac_sem=0.01, gauss_seidel=False, update_hyper_sigma=True, update_hyper_p=True, sparse_solution=False, pre_filter_batch_size=None, pre_filter_small_batch_size=500, sparse_frac_betas=None, betas_trace_out=None, run_betas_using_phewas=False, run_uncorrected_using_phewas=False, **kwargs):
-
-        run_using_phewas = run_betas_using_phewas or run_uncorrected_using_phewas
-
-        log("Calculating betas")
-        if run_using_phewas:
-            (beta_tildes_to_use, ses_to_use) = (self.beta_tildes_phewas, self.ses_phewas)
-        else:
-            (beta_tildes_to_use, ses_to_use) = (self.beta_tildes, self.ses)
-
-        if not run_using_phewas or run_uncorrected_using_phewas:
-            result_uncorrected = self._calculate_non_inf_betas(p, beta_tildes=beta_tildes_to_use, ses=ses_to_use, max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter, min_num_iter=min_num_iter, num_chains=num_chains, r_threshold_burn_in=r_threshold_burn_in, use_max_r_for_convergence=use_max_r_for_convergence, max_frac_sem=max_frac_sem, gauss_seidel=gauss_seidel, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, assume_independent=True, V=None, **kwargs)
-
-        avg_betas_v = np.zeros(len(self.gene_sets))
-        avg_postp_v = np.zeros(len(self.gene_sets))
-
-        if run_using_phewas:
-            initial_run_mask = np.full(len(self.gene_sets), True)
-        else:
-            (avg_betas_uncorrected_v, avg_postp_uncorrected_v) = result_uncorrected
-            initial_run_mask = avg_betas_uncorrected_v != 0
-
-        run_mask = copy.copy(initial_run_mask)
-
-        if pre_filter_batch_size is not None and np.sum(initial_run_mask) > pre_filter_batch_size:
-            self._record_param("pre_filter_batch_size_orig", pre_filter_batch_size)
-
-            num_batches = self._get_num_X_blocks(self.X_orig[:,initial_run_mask], batch_size=pre_filter_small_batch_size)
-            if num_batches > 1:
-                #try to run with small batches to see if we can zero out more
-                gene_set_masks = self._compute_gene_set_batches(V=None, X_orig=self.X_orig[:,initial_run_mask], mean_shifts=self.mean_shifts[initial_run_mask], scale_factors=self.scale_factors[initial_run_mask], find_correlated_instead=pre_filter_small_batch_size)
-                if len(gene_set_masks) > 0:
-                    if np.sum(gene_set_masks[-1]) == 1 and len(gene_set_masks) > 1:
-                        #merge singletons at the end into the one before
-                        gene_set_masks[-2][gene_set_masks[-1]] = True
-                        gene_set_masks = gene_set_masks[:-1]
-                    if np.sum(gene_set_masks[0]) > 1:
-                        V_data = []
-                        V_rows = []
-                        V_cols = []
-                        for gene_set_mask in gene_set_masks:
-                            V_block = self._calculate_V_internal(self.X_orig[:,initial_run_mask][:,gene_set_mask], self.y_corr_cholesky, self.mean_shifts[initial_run_mask][gene_set_mask], self.scale_factors[initial_run_mask][gene_set_mask])
-                            orig_indices = np.where(gene_set_mask)[0]
-                            V_rows += list(np.repeat(orig_indices, V_block.shape[0]))
-                            V_cols += list(np.tile(orig_indices, V_block.shape[0]))
-                            V_data += list(V_block.ravel())
-                            
-                        V_sparse = sparse.csc_matrix((V_data, (V_rows, V_cols)), shape=(np.sum(initial_run_mask), np.sum(initial_run_mask)))
-
-                        log("Running %d blocks to check for zeros..." % len(gene_set_masks), DEBUG)
-                        (avg_betas_half_corrected_v, avg_postp_half_corrected_v) = self._calculate_non_inf_betas(p, V=V_sparse, X_orig=None, scale_factors=self.scale_factors[initial_run_mask], mean_shifts=self.mean_shifts[initial_run_mask], is_dense_gene_set=self.is_dense_gene_set[initial_run_mask], ps=self.ps[initial_run_mask], sigma2s=self.sigma2s[initial_run_mask], max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter, min_num_iter=min_num_iter, num_chains=num_chains, r_threshold_burn_in=r_threshold_burn_in, use_max_r_for_convergence=use_max_r_for_convergence, max_frac_sem=max_frac_sem, gauss_seidel=gauss_seidel, update_hyper_sigma=update_hyper_sigma, update_hyper_p=update_hyper_p, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, **kwargs)
-
-                        add_zero_mask = avg_betas_half_corrected_v == 0
-
-                        if np.any(add_zero_mask):
-                            #need to convert these to the original gene sets
-                            map_to_full = np.where(initial_run_mask)[0]
-                            #get rows and then columns in subsetted
-                            set_to_zero_full = np.where(add_zero_mask)
-                            #map columns in subsetted to original
-                            set_to_zero_full = map_to_full[set_to_zero_full]
-                            orig_zero = np.sum(run_mask)
-                            run_mask[set_to_zero_full] = False
-                            new_zero = np.sum(run_mask)
-                            log("Found %d additional zero gene sets" % (orig_zero - new_zero),DEBUG)
-
-        if np.sum(~run_mask) > 0:
-            log("Set additional %d gene sets to zero based on uncorrected betas" % np.sum(~run_mask))
-
-        if np.sum(run_mask) == 0 and self.p_values is not None:
-            run_mask[np.argmax(self.p_values)] = True
-
-        if run_using_phewas:
-            (beta_tildes_to_use, ses_to_use) = (self.beta_tildes_phewas[:,run_mask], self.ses_phewas[:,run_mask])
-        else:
-            (beta_tildes_to_use, ses_to_use) = (self.beta_tildes[run_mask], self.ses[run_mask])
-
-        if not run_using_phewas or run_betas_using_phewas:
-            result = self._calculate_non_inf_betas(p, beta_tildes=beta_tildes_to_use, ses=ses_to_use, X_orig=self.X_orig[:,run_mask], scale_factors=self.scale_factors[run_mask], mean_shifts=self.mean_shifts[run_mask], V=None, ps=self.ps[run_mask] if self.ps is not None else None, sigma2s=self.sigma2s[run_mask] if self.sigma2s is not None else None, is_dense_gene_set=self.is_dense_gene_set[run_mask], max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter, min_num_iter=min_num_iter, num_chains=num_chains, r_threshold_burn_in=r_threshold_burn_in, use_max_r_for_convergence=use_max_r_for_convergence, max_frac_sem=max_frac_sem, gauss_seidel=gauss_seidel, update_hyper_sigma=update_hyper_sigma, update_hyper_p=update_hyper_p, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, betas_trace_out=betas_trace_out, betas_trace_gene_sets=[self.gene_sets[i] for i in range(len(self.gene_sets)) if run_mask[i]], debug_gene_sets=[self.gene_sets[i] for i in range(len(self.gene_sets)) if run_mask[i]], **kwargs)
-
-        if run_using_phewas:
-            if run_betas_using_phewas:
-                self.betas_phewas = copy.copy(result[0])
-                if len(self.betas_phewas.shape) == 1:
-                    self.betas_phewas = self.betas[np.newaxis,:]
-            if run_uncorrected_using_phewas:
-                self.betas_uncorrected_phewas = copy.copy(result_uncorrected[0])
-                if len(self.betas_uncorrected_phewas.shape) == 1:
-                    self.betas_uncorrected_phewas = self.betas_uncorrected_phewas[np.newaxis,:]
-
-        else:
-            (avg_betas_v[run_mask], avg_postp_v[run_mask]) = result
-
-            if len(avg_betas_v.shape) == 2:
-                avg_betas_v = np.mean(avg_betas_v, axis=0)
-                avg_postp_v = np.mean(avg_postp_v, axis=0)
-
-            self.betas = copy.copy(avg_betas_v)
-            self.betas_uncorrected = copy.copy(avg_betas_uncorrected_v)
-
-            self.non_inf_avg_postps = copy.copy(avg_postp_v)
-            self.non_inf_avg_cond_betas = copy.copy(avg_betas_v)
-            self.non_inf_avg_cond_betas[avg_postp_v > 0] /= avg_postp_v[avg_postp_v > 0]
-
-            if self.gene_sets_missing is not None:
-                self.betas_missing = np.zeros(len(self.gene_sets_missing))
-                self.betas_uncorrected_missing = np.zeros(len(self.gene_sets_missing))
-                self.non_inf_avg_postps_missing = np.zeros(len(self.gene_sets_missing))
-                self.non_inf_avg_cond_betas_missing = np.zeros(len(self.gene_sets_missing))
-
-    def calculate_priors(self, max_gene_set_p=None, num_gene_batches=None, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, p_noninf=None, run_logistic=True, max_for_linear=0.95, adjust_priors=False, tag="", **kwargs):
-        if self.X_orig is None:
-            bail("X is required for this operation")
-        if self.betas is None:
-            bail("betas are required for this operation")
-
-        use_X = False
-
-        assert(self.gene_sets is not None)
-        max_num_gene_batches_together = 10000
-        #if 0, don't use any V
-        num_gene_batches_parallel = int(max_num_gene_batches_together / len(self.gene_sets))
-        if num_gene_batches_parallel == 0:
-            use_X = True
-            log("Using low memory X instead of V in priors", TRACE)
-            num_gene_batches_parallel = 1
-
-        loco = False
-        if num_gene_batches is None:
-            log("Doing leave-one-chromosome-out cross validation for priors computation")
-            loco = True
-
-        if num_gene_batches is not None and num_gene_batches < 2:
-            #this calculates the values for the non missing genes
-            #use original X matrix here because we are rescaling betas back to those units
-            priors = np.array(self.X_orig.dot(self.betas / self.scale_factors) - np.sum(self.mean_shifts * self.betas / self.scale_factors)).flatten()
-            self.combined_prior_Ys = None
-            self.combined_prior_Ys_for_regression = None
-            self.combined_prior_Ys_adj = None
-            self.combined_prior_Y_ses = None
-            self.combined_Ds = None
-            self.batches = None
-        else:
-
-            if loco:
-                if gene_loc_file is None:
-                    bail("Need --gene-loc-file for --loco")
-
-                gene_chromosomes = {}
-                batches = set()
-                log("Reading gene locations")
-                if self.gene_to_chrom is None:
-                    self.gene_to_chrom = {}
-                if self.gene_to_pos is None:
-                    self.gene_to_pos = {}
-
-                with open_gz(gene_loc_file) as gene_loc_fh:
-                    for line in gene_loc_fh:
-                        cols = line.strip('\n').split()
-                        if len(cols) != 6:
-                            bail("Format for --gene-loc-file is:\n\tgene_id\tchrom\tstart\tstop\tstrand\tgene_name\nOffending line:\n\t%s" % line)
-                        gene_name = cols[5]
-                        if gene_name not in self.gene_to_ind:
-                            continue
-
-                        chrom = self._clean_chrom(cols[1])
-                        pos1 = int(cols[2])
-                        pos2 = int(cols[3])
-
-                        self.gene_to_chrom[gene_name] = chrom
-                        self.gene_to_pos[gene_name] = (pos1,pos2)
-
-                        batches.add(chrom)
-                        gene_chromosomes[gene_name] = chrom
-                batches = sorted(batches)
-                num_gene_batches = len(batches)
-            else:
-                #need sorted genes and correlation matrix to batch genes
-                if self.y_corr is None:
-                    correlation_m = self._read_correlations(gene_cor_file, gene_loc_file, gene_cor_file_gene_col=gene_cor_file_gene_col, gene_cor_file_cor_start_col=gene_cor_file_cor_start_col)
-                    self._set_Y(self.Y, self.Y_for_regression, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts, Y_corr_m=correlation_m, skip_V=True, store_cholesky=False, skip_scale_factors=True, min_correlation=None)
-                batches = range(num_gene_batches)
-
-            gene_batch_size = int(len(self.genes) / float(num_gene_batches) + 1)
-            self.batches = [None] * len(self.genes)
-            priors = np.zeros(len(self.genes))
-
-            #store a matrix of all beta_tildes across all batches
-            full_matrix_shape = (len(batches), len(self.gene_sets) + (len(self.gene_sets_missing) if self.gene_sets_missing is not None else 0))
-            full_beta_tildes_m = np.zeros(full_matrix_shape)
-            full_ses_m = np.zeros(full_matrix_shape)
-            full_z_scores_m = np.zeros(full_matrix_shape)
-            full_se_inflation_factors_m = np.zeros(full_matrix_shape)
-            full_p_values_m = np.zeros(full_matrix_shape)
-            full_scale_factors_m = np.zeros(full_matrix_shape)
-            full_ps_m = None
-            if self.ps is not None:
-                full_ps_m = np.zeros(full_matrix_shape)                
-            full_sigma2s_m = None
-            if self.sigma2s is not None:
-                full_sigma2s_m = np.zeros(full_matrix_shape)                
-
-            full_is_dense_gene_set_m = np.zeros(full_matrix_shape, dtype=bool)
-            full_mean_shifts_m = np.zeros(full_matrix_shape)
-            full_include_mask_m = np.zeros((len(batches), len(self.genes)), dtype=bool)
-            full_priors_mask_m = np.zeros((len(batches), len(self.genes)), dtype=bool)
-
-            #combine X_orig and X_orig missing
-            revert_subset_mask = None
-            if self.gene_sets_missing is not None:
-                revert_subset_mask = self._unsubset_gene_sets(skip_V=True)
-
-            for batch_ind in range(len(batches)):
-                batch = batches[batch_ind]
-
-                #specify:
-                # (a) include_mask: the genes that are used for calculating beta tildes and betas for this batch
-                # (b) priors_mask: the genes that we will calculate priors for
-                #these are not exact complements because we may need to exlude some genes for both (i.e. a buffer)
-                if loco:
-                    include_mask = np.array([True] * len(self.genes))
-                    priors_mask = np.array([False] * len(self.genes))
-                    for i in range(len(self.genes)):
-                        if self.genes[i] not in gene_chromosomes:
-                            include_mask[i] = False
-                            priors_mask[i] = True
-                        elif gene_chromosomes[self.genes[i]] == batch:
-                            include_mask[i] = False
-                            priors_mask[i] = True
-                        else:
-                            include_mask[i] = True
-                            priors_mask[i] = False
-                    log("Batch %s: %d genes" % (batch, np.sum(priors_mask)))
-                else:
-                    begin = batch * gene_batch_size
-                    end = (batch + 1) * gene_batch_size
-                    if end > len(self.genes):
-                        end = len(self.genes)
-                    end = end - 1
-                    log("Batch %d: genes %d - %d" % (batch+1, begin, end))
-
-
-                    #include only genes not correlated with any in the current batch
-                    include_mask = np.array([True] * len(self.genes))
-
-                    include_mask_begin = begin - 1
-                    while include_mask_begin > 0 and (begin - include_mask_begin) < len(self.y_corr) and self.y_corr[begin - include_mask_begin][include_mask_begin] > 0:
-                        include_mask_begin -= 1
-                    include_mask_begin += 1
-
-                    include_mask_end = end + 1
-                    while (include_mask_end - end) < len(self.y_corr) and self.y_corr[include_mask_end - end][end] > 0:
-                        include_mask_end += 1
-                    include_mask[include_mask_begin:include_mask_end] = False
-                    include_mask_end -= 1
-
-                    priors_mask = np.array([False] * len(self.genes))
-                    priors_mask[begin:(end+1)] = True
-
-
-                for i in range(len(self.genes)):
-                    if priors_mask[i]:
-                        self.batches[i] = batch
-
-                #now subset Y
-                Y = copy.copy(self.Y_for_regression)
-                y_corr = None
-                y_corr_cholesky = None
-                y_corr_sparse = None
-
-                if self.y_corr is not None:
-                    y_corr = copy.copy(self.y_corr)
-                    if not loco:
-                        #we cannot rely on chromosome boundaries to zero out correlations, so manually do this
-                        for i in range(include_mask_begin - 1, include_mask_begin - y_corr.shape[0], -1):
-                            y_corr[include_mask_begin - i:,i] = 0
-                    #don't need to zero out anything for include_mask_end because correlations between after end and removed are all stored inside of the removed indices
-                    y_corr = y_corr[:,include_mask]
-
-                    if self.y_corr_cholesky is not None:
-                        Y = copy.copy(self.Y_fw)
-                        #this is the correlation matrix we will use this batch
-                        #it is a subsetted version of the self.y_corr but with the correlations with the removed genes zeroed out
-                        y_corr_cholesky = self._get_y_corr_cholesky(y_corr)
-                    elif self.y_corr_sparse is not None:
-                        y_corr_sparse = self.y_corr_sparse[include_mask,:][:,include_mask]
-                
-                Y = Y[include_mask]
-                y_var = np.var(Y)
-
-                #DO WE NEED THIS??
-                #y_mean = np.mean(Y)
-                #Y = Y - y_mean
-
-                (mean_shifts, scale_factors) = self._calc_X_shift_scale(self.X_orig[include_mask,:], y_corr_cholesky)
-
-                #if some gene sets became empty!
-                assert(not np.any(np.logical_and(mean_shifts != 0, scale_factors == 0)))
-                mean_shifts[mean_shifts == 0] = 0
-                scale_factors[scale_factors == 0] = 1
-
-                ps = self.ps
-                sigma2s = self.sigma2s
-                is_dense_gene_set = self.is_dense_gene_set
-
-                #max_gene_set_p = self.max_gene_set_p if self.max_gene_set_p is not None else 1
-
-                Y_to_use = Y
-                D = np.exp(Y_to_use + self.background_log_bf) / (1 + np.exp(Y_to_use + self.background_log_bf))
-                if np.max(D) > max_for_linear:
-                    run_logistic = True
-
-                #compute special beta tildes here
-                if run_logistic:
-                    (beta_tildes, ses, z_scores, p_values, se_inflation_factors, alpha_tildes, diverged) = self._compute_logistic_beta_tildes(self.X_orig[include_mask,:], D, scale_factors, mean_shifts, resid_correlation_matrix=y_corr_sparse)
-                else:
-                    (beta_tildes, ses, z_scores, p_values, se_inflation_factors) = self._compute_beta_tildes(self.X_orig[include_mask,:], Y, y_var, scale_factors, mean_shifts, resid_correlation_matrix=y_corr_sparse)
-
-                if correct_betas_mean or correct_betas_var:
-                    (beta_tildes, ses, z_scores, p_values, se_inflation_factors) = self._correct_beta_tildes(beta_tildes, ses, se_inflation_factors, self.total_qc_metrics, self.total_qc_metrics_directions, correct_mean=correct_betas_mean, correct_var=correct_betas_var, fit=False)
-
-                #now determine those that have too many genes removed to be accurate
-                mean_reduction = float(num_gene_batches - 1) / float(num_gene_batches)
-                sd_reduction = np.sqrt(mean_reduction * (1 - mean_reduction))
-                reduction = mean_shifts / self.mean_shifts
-                ignore_mask = reduction < mean_reduction - 3 * sd_reduction
-                if sum(ignore_mask) > 0:
-                    log("Ignoring %d gene sets because there are too many genes are missing from this batch" % sum(ignore_mask))
-                    for ind in np.array(range(len(ignore_mask)))[ignore_mask]:
-                        log("%s: %.4g remaining (vs. %.4g +/- %.4g expected)" % (self.gene_sets[ind], reduction[ind], mean_reduction, sd_reduction), TRACE)
-                #also zero out anything above the p-value threshold; this is a convenience for below
-                #note that p-values are still preserved though for below
-                ignore_mask = np.logical_or(ignore_mask, p_values > max_gene_set_p)
-
-                beta_tildes[ignore_mask] = 0
-                ses[ignore_mask] = max(self.ses) * 100
-
-                full_beta_tildes_m[batch_ind,:] = beta_tildes
-                full_ses_m[batch_ind,:] = ses
-                full_z_scores_m[batch_ind,:] = z_scores
-                full_se_inflation_factors_m[batch_ind,:] = se_inflation_factors
-                full_p_values_m[batch_ind,:] = p_values
-                full_scale_factors_m[batch_ind,:] = scale_factors
-                full_mean_shifts_m[batch_ind,:] = mean_shifts
-                if full_ps_m is not None:
-                    full_ps_m[batch_ind,:] = ps
-                if full_sigma2s_m is not None:
-                    full_sigma2s_m[batch_ind,:] = sigma2s
-
-                full_is_dense_gene_set_m[batch_ind,:] = is_dense_gene_set
-                full_include_mask_m[batch_ind,:] = include_mask
-                full_priors_mask_m[batch_ind,:] = priors_mask
-
-            #now calculate everything
-            if p_noninf is None or p_noninf >= 1:
-                num_gene_batches_parallel = 1
-            num_calculations = int(np.ceil(num_gene_batches / num_gene_batches_parallel))
-            for calc in range(num_calculations):
-                begin = calc * num_gene_batches_parallel
-                end = (calc + 1) * num_gene_batches_parallel
-                if end > num_gene_batches:
-                    end = num_gene_batches
-                
-                log("Running calculations for batches %d-%d" % (begin, end))
-
-                #ensure there is at least one gene set remaining
-                max_gene_set_p_v = np.min(full_p_values_m[begin:end,:], axis=1)
-                #max_gene_set_p_v[max_gene_set_p_v < (self.max_gene_set_p if self.max_gene_set_p is not None else 1)] = (self.max_gene_set_p if self.max_gene_set_p is not None else 1)
-                max_gene_set_p_v[max_gene_set_p_v < (max_gene_set_p if max_gene_set_p is not None else 1)] = (max_gene_set_p if max_gene_set_p is not None else 1)
-
-                #get the include mask; any batch has p <= threshold
-                new_gene_set_mask = np.max(full_p_values_m[begin:end,:].T <= max_gene_set_p_v, axis=1)
-                num_gene_set_mask = np.sum(new_gene_set_mask)
-
-                #we unsubset genes to aid in batching; this caused sigma and p to be affected
-                fraction_non_missing = np.mean(new_gene_set_mask)
-                missing_scale_factor = self._get_fraction_non_missing() / fraction_non_missing
-                if missing_scale_factor > 1 / self.p:
-                    #threshold this here. otherwise set_p will cap p but set_sigma won't cap sigma
-                    missing_scale_factor = 1 / self.p
-                
-                #orig_sigma2 = self.sigma2
-                #orig_p = self.p
-                #self.set_sigma(self.sigma2 * missing_scale_factor, self.sigma_power, sigma2_osc=self.sigma2_osc)
-                #self.set_p(self.p * missing_scale_factor)
-
-                #construct the V matrix
-                if not use_X:
-                    V_m = np.zeros((end-begin, num_gene_set_mask, num_gene_set_mask))
-                    for i,j in zip(range(begin, end),range(end-begin)):
-                        include_mask = full_include_mask_m[i,:]
-
-                        V_m[j,:,:] = self._calculate_V_internal(self.X_orig[include_mask,:][:,new_gene_set_mask], y_corr_cholesky, full_mean_shifts_m[i,new_gene_set_mask], full_scale_factors_m[i,new_gene_set_mask])
-                else:
-                    V_m = None
-
-                cur_beta_tildes = full_beta_tildes_m[begin:end,:][:,new_gene_set_mask]
-                cur_ses = full_ses_m[begin:end,:][:,new_gene_set_mask]
-                cur_se_inflation_factors = full_se_inflation_factors_m[begin:end,:][:,new_gene_set_mask]
-                cur_scale_factors = full_scale_factors_m[begin:end,:][:,new_gene_set_mask]
-                cur_mean_shifts = full_mean_shifts_m[begin:end,:][:,new_gene_set_mask]
-                cur_is_dense_gene_set = full_is_dense_gene_set_m[begin:end,:][:,new_gene_set_mask]
-                cur_ps = None
-                if full_ps_m is not None:
-                    cur_ps = full_ps_m[begin:end,:][:,new_gene_set_mask]
-                cur_sigma2s = None
-                if full_sigma2s_m is not None:
-                    cur_sigma2s = full_sigma2s_m[begin:end,:][:,new_gene_set_mask]
-
-                #only non inf now
-                (betas, avg_postp) = self._calculate_non_inf_betas(None, beta_tildes=cur_beta_tildes, ses=cur_ses, V=V_m, X_orig=self.X_orig[include_mask,:][:,new_gene_set_mask], scale_factors=cur_scale_factors, mean_shifts=cur_mean_shifts, is_dense_gene_set=cur_is_dense_gene_set, ps=cur_ps, sigma2s=cur_sigma2s, update_hyper_sigma=False, update_hyper_p=False, num_missing_gene_sets=int((1 - fraction_non_missing) * len(self.gene_sets)), **kwargs)
-                if len(betas.shape) == 1:
-                    betas = betas[np.newaxis,:]
-
-
-                #if do inf:
-                #    V = V_m[0,:,:]
-                #    if self.y_corr_cholesky is None and self.y_corr_sparse is not None:
-                #        V_cor = self._calculate_V_internal(self.X_orig[full_include_mask_m[begin,:],:][:,new_gene_set_mask], None, cur_mean_shifts, cur_scale_factors, y_corr_sparse=y_corr_sparse)
-                #        V_inv = self._invert_sym_matrix(V)
-                #    else:
-                #        V_cor = None
-                #        V_inv = None
-                #    betas = self._calculate_inf_betas(beta_tildes=cur_beta_tildes, ses=cur_ses, V=V, V_cor=V_cor, V_inv=V_inv, se_inflation_factors=cur_se_inflation_factors, scale_factors=cur_scale_factors, is_dense_gene_set=cur_is_dense_gene_set)
-                #    betas = betas[np.newaxis,:]
-
-                for i,j in zip(range(begin, end),range(end-begin)):
-
-                    priors[full_priors_mask_m[i,:]] = np.array(self.X_orig[full_priors_mask_m[i,:],:][:,new_gene_set_mask].dot(betas[j,:] / cur_scale_factors[j,:]))
-
-                #now restore the p and sigma
-                #self.set_sigma(orig_sigma2, self.sigma_power, sigma2_osc=self.sigma2_osc)
-                #self.set_p(orig_p)
-
-            #now restore previous subsets
-            self.subset_gene_sets(revert_subset_mask, keep_missing=True, skip_V=True)
-
-        #now for the genes that were not included in X
-        if self.X_orig_missing_genes is not None:
-            #these can use the original betas because they were never included
-            self.priors_missing = np.array(self.X_orig_missing_genes.dot(self.betas / self.scale_factors) - np.sum(self.mean_shifts * self.betas / self.scale_factors))
-        else:
-            self.priors_missing = np.array([])
-
-        #store in member variable
-        total_mean = np.mean(np.concatenate((priors, self.priors_missing)))
-        self.priors = priors - total_mean
-        self.priors_missing -= total_mean
-
-        self.calculate_priors_adj(overwrite_priors=adjust_priors)
-
-    def calculate_priors_adj(self, overwrite_priors=False):
-        if self.priors is None:
-            return
-        
-        #do the regression
-        gene_N = self.get_gene_N()
-        gene_N_missing = self.get_gene_N(get_missing=True)
-        all_gene_N = gene_N
-        if self.genes_missing is not None:
-            assert(gene_N_missing is not None)
-            all_gene_N = np.concatenate((all_gene_N, gene_N_missing))
-
-        if self.genes_missing is not None:
-            total_priors = np.concatenate((self.priors, self.priors_missing))
-        else:
-            total_priors = self.priors
-
-        priors_slope = np.cov(total_priors, all_gene_N)[0,1] / np.var(all_gene_N)
-        priors_intercept = np.mean(total_priors - all_gene_N * priors_slope)
-
-        log("Adjusting priors with slope %.4g" % priors_slope)
-        priors_adj = self.priors - priors_slope * gene_N - priors_intercept
-        if overwrite_priors:
-            self.priors = priors_adj
-        else:
-            self.priors_adj = priors_adj
-        if self.genes_missing is not None:
-            priors_adj_missing = self.priors_missing - priors_slope * gene_N_missing
-            if overwrite_priors:
-                self.priors_missing = priors_adj_missing
-            else:
-                self.priors_adj_missing = priors_adj_missing
-
-    def calculate_naive_priors(self, adjust_priors=False):
-        if self.X_orig is None:
-            bail("X is required for this operation")
-        if self.betas is None:
-            bail("betas are required for this operation")
-        
-        self.priors = self.X_orig.dot(self.betas / self.scale_factors)
-
-        if self.X_orig_missing_genes is not None:
-            self.priors_missing = self.X_orig_missing_genes.dot(self.betas / self.scale_factors)
-        else:
-            self.priors_missing = np.array([])
-
-        total_mean = np.mean(np.concatenate((self.priors, self.priors_missing)))
-        self.priors -= total_mean
-        self.priors_missing -= total_mean
-
-        self.calculate_priors_adj(overwrite_priors=adjust_priors)
-
-        if self.Y is not None:
-            if self.priors is not None:
-                self.combined_prior_Ys = self.priors + self.Y
-            if self.priors_adj is not None:
-                self.combined_prior_Ys_adj = self.priors_adj + self.Y
-
-    def run_gibbs(self, min_num_iter=2, max_num_iter=100, total_num_iter=None, max_num_restarts=3, num_chains=10, num_mad=3, r_threshold_burn_in=1.10, use_max_r_for_convergence=True, increase_hyper_if_betas_below=None, update_huge_scores=True, top_gene_prior=None, min_num_burn_in=10, max_num_burn_in=None, min_num_post_burn_in=None, max_num_post_burn_in=None, max_num_iter_betas=1100, min_num_iter_betas=10, num_chains_betas=4, r_threshold_burn_in_betas=1.01, use_max_r_for_convergence_betas=True, max_frac_sem_betas=0.01, use_mean_betas=True, warm_start=False, burn_in_rhat_quantile=0.95, burn_in_patience=2, min_post_burn_in=None, burn_in_stall_window=10, burn_in_stall_delta=0.01, stop_mcse_quantile=0.95, stop_patience=2, stop_top_gene_k=200, stop_min_gene_d=None, max_abs_mcse_d=0.05, max_rel_mcse_beta=0.20, active_beta_top_k=200, active_beta_min_abs=0.01, beta_rel_mcse_denom_floor=0.10, stall_window=8, stall_min_burn_in=50, stall_min_post_burn_in=50, stall_delta_rhat=0.01, stall_delta_mcse=0.01, stall_recent_window=4, stall_recent_eps=0.0, stopping_preset_name="lenient", diag_every=5, sparse_frac_gibbs=0.01, sparse_max_gibbs=0.001, sparse_solution=False, sparse_frac_betas=None, pre_filter_batch_size=None, pre_filter_small_batch_size=500, max_allowed_batch_correlation=None, gauss_seidel_betas=False, gauss_seidel=False, num_batches_parallel=10, max_mb_X_h=200, initial_linear_filter=True, correct_betas_mean=True, correct_betas_var=True, adjust_priors=True, gene_set_stats_trace_out=None, gene_stats_trace_out=None, betas_trace_out=None, eps=0.01):
-
-        if max_num_restarts is None or max_num_restarts < 0:
-            max_num_restarts = 0
-        target_num_epochs = max_num_restarts + 1
-
-        # Deprecated alias: keep accepting it for compatibility.
-        if min_num_post_burn_in is None and min_post_burn_in is not None:
-            min_num_post_burn_in = min_post_burn_in
-
-        if min_num_burn_in is None:
-            min_num_burn_in = 0
-        if min_num_burn_in < 0:
-            min_num_burn_in = 0
-
-        if min_num_post_burn_in is None:
-            min_num_post_burn_in = min_num_iter if min_num_iter is not None else 1
-        if min_num_post_burn_in < 1:
-            min_num_post_burn_in = 1
-
-        if max_num_burn_in is None:
-            if max_num_iter is not None and max_num_iter > 0:
-                max_num_burn_in = int(np.ceil(max_num_iter * 0.8))
-            else:
-                max_num_burn_in = min_num_burn_in
-            if max_num_burn_in < 1:
-                max_num_burn_in = 1
-        if max_num_burn_in < 1:
-            max_num_burn_in = 1
-        if max_num_burn_in < min_num_burn_in:
-            max_num_burn_in = min_num_burn_in
-
-        if max_num_post_burn_in is None:
-            if max_num_iter is not None and max_num_iter > 0:
-                max_num_post_burn_in = max_num_iter - min_num_burn_in
-            else:
-                max_num_post_burn_in = min_num_post_burn_in
-        if max_num_post_burn_in < 1:
-            max_num_post_burn_in = 1
-        if max_num_post_burn_in < min_num_post_burn_in:
-            max_num_post_burn_in = min_num_post_burn_in
-
-        # Reuse the outer burn-in ceiling for inner beta updates within each Gibbs iteration.
-        passed_in_max_num_burn_in = max_num_burn_in
-
-        epoch_max_num_iter_config = max_num_burn_in + max_num_post_burn_in
-        if epoch_max_num_iter_config < 2:
-            epoch_max_num_iter_config = 2
-
-        if total_num_iter is None:
-            total_num_iter = epoch_max_num_iter_config
-        if total_num_iter < 1:
-            total_num_iter = 1
-
-        def __resolve_epoch_iteration_budget(remaining_iter):
-            local_epoch_max_num_iter = min(epoch_max_num_iter_config, remaining_iter)
-            if local_epoch_max_num_iter < 1:
-                local_epoch_max_num_iter = 1
-
-            local_max_num_burn_in = min(max_num_burn_in, max(1, local_epoch_max_num_iter - 1))
-            local_min_num_burn_in = min(min_num_burn_in, local_max_num_burn_in)
-
-            local_max_num_post_burn_in = min(max_num_post_burn_in, max(1, local_epoch_max_num_iter - local_min_num_burn_in))
-            local_min_num_post_burn_in = min(min_num_post_burn_in, local_max_num_post_burn_in)
-
-            # Ensure burn-in max still leaves room for at least the local post-burn minimum.
-            local_max_num_burn_in = min(local_max_num_burn_in, max(1, local_epoch_max_num_iter - local_min_num_post_burn_in))
-            local_min_num_burn_in = min(local_min_num_burn_in, local_max_num_burn_in)
-            local_max_num_post_burn_in = min(local_max_num_post_burn_in, max(1, local_epoch_max_num_iter - local_min_num_burn_in))
-            local_min_num_post_burn_in = min(local_min_num_post_burn_in, local_max_num_post_burn_in)
-
-            return (local_epoch_max_num_iter, local_min_num_burn_in, local_max_num_burn_in, local_min_num_post_burn_in, local_max_num_post_burn_in)
-
-        if num_chains < 2:
-            num_chains = 2
-
-        if diag_every < 1:
-            diag_every = 1
-        if burn_in_patience < 1:
-            burn_in_patience = 1
-        if burn_in_stall_window is None or burn_in_stall_window < 2:
-            burn_in_stall_window = 0
-        if burn_in_stall_delta is None or burn_in_stall_delta < 0:
-            burn_in_stall_delta = 0
-        if stop_patience < 1:
-            stop_patience = 1
-        if stop_top_gene_k < 1:
-            stop_top_gene_k = 1
-        if stop_min_gene_d is not None:
-            if stop_min_gene_d < 0:
-                stop_min_gene_d = 0
-            if stop_min_gene_d > 1:
-                stop_min_gene_d = 1
-        if active_beta_top_k < 1:
-            active_beta_top_k = 1
-        if active_beta_min_abs < 0:
-            active_beta_min_abs = 0
-        if beta_rel_mcse_denom_floor <= 0:
-            beta_rel_mcse_denom_floor = 1e-12
-        if stall_window is None or stall_window < 2:
-            stall_window = 0
-        if stall_min_burn_in is None or stall_min_burn_in < 0:
-            stall_min_burn_in = 0
-        if stall_min_post_burn_in is None or stall_min_post_burn_in < 0:
-            stall_min_post_burn_in = 0
-        if stall_delta_rhat is None or stall_delta_rhat < 0:
-            stall_delta_rhat = 0
-        if stall_delta_mcse is None or stall_delta_mcse < 0:
-            stall_delta_mcse = 0
-        if stall_recent_window is None or stall_recent_window < 2:
-            stall_recent_window = 0
-        if stall_recent_eps is None or stall_recent_eps < 0:
-            stall_recent_eps = 0
-        # Keep legacy --use-max-r-for-convergence as an alias of q=1.0.
-        if burn_in_rhat_quantile is None:
-            burn_in_rhat_quantile = 1.0
-        if use_max_r_for_convergence:
-            burn_in_rhat_quantile = 1.0
-        if burn_in_rhat_quantile < 0:
-            burn_in_rhat_quantile = 0
-        elif burn_in_rhat_quantile > 1:
-            burn_in_rhat_quantile = 1
-
-        first_epoch_max_num_iter, first_min_num_burn_in, first_max_num_burn_in, first_min_num_post_burn_in, first_max_num_post_burn_in = __resolve_epoch_iteration_budget(total_num_iter)
-
-        self._record_params({"num_chains": num_chains, "num_chains_betas": num_chains_betas, "max_num_restarts": max_num_restarts, "target_num_epochs": target_num_epochs, "max_num_attempt_restarts": target_num_epochs + max_num_restarts, "max_num_iter": max_num_iter, "total_num_iter": total_num_iter, "epoch_max_num_iter": epoch_max_num_iter_config, "use_mean_betas": use_mean_betas, "warm_start": warm_start, "stopping_preset_name": stopping_preset_name, "r_threshold_burn_in": r_threshold_burn_in, "burn_in_rhat_quantile": burn_in_rhat_quantile, "burn_in_rhat_quantile_effective": burn_in_rhat_quantile, "burn_in_patience": burn_in_patience, "min_num_burn_in": first_min_num_burn_in, "max_num_burn_in": first_max_num_burn_in, "min_num_post_burn_in": first_min_num_post_burn_in, "max_num_post_burn_in": first_max_num_post_burn_in, "burn_in_stall_window": burn_in_stall_window, "burn_in_stall_delta": burn_in_stall_delta, "active_beta_top_k": active_beta_top_k, "active_beta_min_abs": active_beta_min_abs, "stop_mcse_quantile": stop_mcse_quantile, "stop_patience": stop_patience, "stop_top_gene_k": stop_top_gene_k, "stop_min_gene_d": stop_min_gene_d, "max_abs_mcse_d": max_abs_mcse_d, "max_rel_mcse_beta": max_rel_mcse_beta, "beta_rel_mcse_denom_floor": beta_rel_mcse_denom_floor, "stall_window": stall_window, "stall_min_burn_in": stall_min_burn_in, "stall_min_post_burn_in": stall_min_post_burn_in, "stall_delta_rhat": stall_delta_rhat, "stall_delta_mcse": stall_delta_mcse, "stall_recent_window": stall_recent_window, "stall_recent_eps": stall_recent_eps, "diag_every": diag_every, "sparse_solution": sparse_solution, "sparse_frac": sparse_frac_gibbs, "sparse_max": sparse_max_gibbs, "sparse_frac_betas": sparse_frac_betas, "pre_filter_batch_size": pre_filter_batch_size, "max_allowed_batch_correlation": max_allowed_batch_correlation, "initial_linear_filter": initial_linear_filter, "correct_betas_mean": correct_betas_mean, "correct_betas_var": correct_betas_var, "adjust_priors": adjust_priors})
-        # Clearer aliases for downstream inspection; legacy key kept for compatibility.
-        self._record_param("min_num_post_burn_in_effective", first_min_num_post_burn_in)
-        self._record_param("stall_min_post_burn_samples", stall_min_post_burn_in)
-
-        log("Running Gibbs")
-        log("Gibbs stopping preset=%s; burn-in: r_threshold=%.4g, rhat_q=%.3g, patience=%d; active betas: topK=%d, min_abs=%.4g" % (stopping_preset_name, r_threshold_burn_in, burn_in_rhat_quantile, burn_in_patience, active_beta_top_k, active_beta_min_abs), INFO)
-        log("Gibbs restart schedule: target_epochs=%d (max_num_restarts=%d), max_attempts=%d, per-epoch max_num_iter=%d, total_num_iter=%d" % (target_num_epochs, max_num_restarts, target_num_epochs + max_num_restarts, epoch_max_num_iter_config, total_num_iter), INFO)
-        log("Gibbs epoch bounds (epoch 1): burn=[%d,%d], post=[%d,%d], stall_window=%d, stall_delta=%.4g" % (first_min_num_burn_in, first_max_num_burn_in, first_min_num_post_burn_in, first_max_num_post_burn_in, burn_in_stall_window, burn_in_stall_delta), INFO)
-        log("Gibbs stopping thresholds: stop_q=%.3g, stop_patience=%d, max_rel_mcse_beta=%.4g, beta_rel_mcse_denom_floor=%.4g, stop_top_gene_k=%d, stop_min_gene_d=%s, max_abs_mcse_d=%.4g, diag_every=%d" % (stop_mcse_quantile, stop_patience, max_rel_mcse_beta, beta_rel_mcse_denom_floor, stop_top_gene_k, ("%.4g" % stop_min_gene_d) if stop_min_gene_d is not None else "None", max_abs_mcse_d, diag_every), INFO)
-        log("Gibbs stall controls: window=%d, min_burn=%d, min_post_for_stall=%d, delta_rhat=%.4g, delta_mcse=%.4g, recent_window=%d, recent_eps=%.4g" % (stall_window, stall_min_burn_in, stall_min_post_burn_in, stall_delta_rhat, stall_delta_mcse, stall_recent_window, stall_recent_eps), INFO)
-
-        # Reset diagnostics that are specific to this Gibbs run.
-        self.betas_r_hat = None
-        self.betas_mcse = None
-        self.betas_uncorrected_r_hat = None
-        self.betas_uncorrected_mcse = None
-        self.priors_r_hat = None
-        self.priors_mcse = None
-        self.combined_prior_Ys_r_hat = None
-        self.combined_prior_Ys_mcse = None
-        self.Y_r_hat = None
-        self.Y_mcse = None
-
-        #save all of the old values
-        self.beta_tildes_orig = copy.copy(self.beta_tildes)
-        self.p_values_orig = copy.copy(self.p_values)
-        self.ses_orig = copy.copy(self.ses)
-        self.z_scores_orig = copy.copy(self.z_scores)
-        self.beta_tildes_missing_orig = copy.copy(self.beta_tildes_missing)
-        self.p_values_missing_orig = copy.copy(self.p_values_missing)
-        self.ses_missing_orig = copy.copy(self.ses_missing)
-        self.z_scores_missing_orig = copy.copy(self.z_scores_missing)
-
-        self.betas_orig = copy.copy(self.betas)
-        self.betas_uncorrected_orig = copy.copy(self.betas_uncorrected)
-        self.inf_betas_orig = copy.copy(self.inf_betas)
-        self.non_inf_avg_cond_betas_orig = copy.copy(self.non_inf_avg_cond_betas)
-        self.non_inf_avg_postps_orig = copy.copy(self.non_inf_avg_postps)
-        self.betas_missing_orig = copy.copy(self.betas_missing)
-        self.betas_uncorrected_missing_orig = copy.copy(self.betas_uncorrected_missing)
-        self.inf_betas_missing_orig = copy.copy(self.inf_betas_missing)
-        self.non_inf_avg_cond_betas_missing_orig = copy.copy(self.non_inf_avg_cond_betas_missing)
-        self.non_inf_avg_postps_missing_orig = copy.copy(self.non_inf_avg_postps_missing)
-
-        self.Y_orig = copy.copy(self.Y)
-        self.Y_for_regression_orig = copy.copy(self.Y_for_regression)
-        self.Y_w_orig = copy.copy(self.Y_w)
-        self.Y_fw_orig = copy.copy(self.Y_fw)
-        self.priors_orig = copy.copy(self.priors)
-        self.priors_adj_orig = copy.copy(self.priors_adj)
-        self.priors_missing_orig = copy.copy(self.priors_missing)
-
-        self.priors_adj_missing_orig = copy.copy(self.priors_adj_missing)
-
-
-        #we always update correlation relative to the original one
-        y_var_orig = np.var(self.Y_for_regression)
-
-        #set up constants throughout the loop
-
-        Y_to_use = self.Y_for_regression_orig
-        bf_orig = np.exp(Y_to_use)
-
-        bf_orig_raw = np.exp(self.Y_orig)
-
-        #conditional variance of Y given beta: calculate residuals given priors
-        priors_guess = np.array(self.X_orig.dot(self.betas / self.scale_factors) - np.sum(self.mean_shifts * self.betas / self.scale_factors))
-
-        Y_resid = np.var(self.Y_for_regression_orig - priors_guess)
-        Y_cond_var = Y_resid
-
-        if top_gene_prior is not None:
-            if top_gene_prior <= 0 or top_gene_prior >= 1:
-                bail("--top-gene-prior needs to be in (0,1)")
-            Y_total_var = self.convert_prior_to_var(top_gene_prior, len(self.genes))
-            Y_cond_var = Y_total_var - self.get_sigma2(convert_sigma_to_external_units=True) * np.mean(self.get_gene_N())
-            if Y_cond_var < 0:
-                #minimum value
-                Y_cond_var = 0.1
-            log("Setting Y cond var=%.4g (total var = %.4g) given top gene prior of %.4g" % (Y_cond_var, Y_total_var, top_gene_prior))
-
-        Y_cond_sd = np.sqrt(Y_cond_var)
-
-
-        #this is the density of the relative (log) prior odds
-
-        bf_orig_m = np.tile(bf_orig, num_chains).reshape(num_chains, len(bf_orig))
-        log_bf_m = np.log(bf_orig_m)
-        log_bf_uncorrected_m = np.log(bf_orig_m)
-
-        bf_orig_raw_m = np.tile(bf_orig_raw, num_chains).reshape(num_chains, len(bf_orig_raw))
-        log_bf_raw_m = np.log(bf_orig_raw_m)
-
-        compute_Y_raw = np.any(~np.isclose(log_bf_m, log_bf_raw_m))
-
-        #we will adjust this to preserve the original probabilities if requested
-        cur_background_log_bf_v = np.tile(self.background_log_bf, num_chains)
-
-        def __density_fun(x, loc, scale, bf=bf_orig, background_log_bf=self.background_log_bf, do_expected=False):
-            if type(x) == np.ndarray:
-                prob = np.ones(x.shape)
-                okay_mask = x < 10
-                #we need absolute odds (not relative) for this calculation so add in background_log_bf
-                x_odds = np.exp(x[okay_mask] + background_log_bf)
-                prob[okay_mask] =  x_odds / (1 + x_odds)
-            else:
-                if x < 10:
-                    x_odds = np.exp(x + background_log_bf)
-                    prob = x_odds / (1 + x_odds)
-                else:
-                    prob = 1
-        
-            density = (bf * prob + (1 - prob)) * scipy.stats.norm.pdf(x, loc=loc, scale=scale)
-            if do_expected:
-                return np.dstack((density.T, x * density.T, np.square(x) * density.T)).T
-            else:
-                return density
-
-        def __outlier_resistant_mean(sum_m, num_sum_m, outlier_mask_m=None):
-            if outlier_mask_m is None:
-
-                self._record_param("mad_threshold", num_mad)
-
-                #1. calculate mean values for each chain (divide by number -- make sure it is correct; may not be num_avg_Y)
-                chain_means_m = sum_m / num_sum_m
-
-                #2. calculate median values across chains (one number per gene set/gene)
-                medians_v = np.median(chain_means_m, axis=0)
-
-                #3. calculate abs(difference) between each chain and median (one value per chain/geneset)
-                mad_m = np.abs(chain_means_m - medians_v)
-
-                #4. calculate median of abs(difference) across chains (one number per gene set/gene)
-                mad_median_v = np.median(mad_m, axis=0)
-
-                #5. mask any chain that is more than 3 median(abs(difference)) from median
-                outlier_mask_m = chain_means_m > medians_v + num_mad * mad_median_v
-
-            #6. take average only across chains that are not outliers
-            num_sum_v = np.sum(~outlier_mask_m, axis=0)
-
-            #should never happen but just in case
-            num_sum_v[num_sum_v == 0] = 1
-
-            #7. to do this, zero out outlier chains, then sum them, then divide by number of outliers
-            copy_sum_m = copy.copy(sum_m)
-            copy_sum_m[outlier_mask_m] = 0
-            avg_v = np.sum(copy_sum_m / num_sum_m, axis=0) / num_sum_v
-            
-            return (outlier_mask_m, avg_v)
-
-        def __calculate_R(sum_m, sum2_m, num):
-            if num <= 1:
-                default_v = np.ones(sum_m.shape[1])
-                return (default_v, default_v, default_v, default_v)
-            mean_m = sum_m / float(num)
-            mean_v = np.mean(mean_m, axis=0)
-            var_m = (sum2_m - float(num) * np.power(mean_m, 2)) / (float(num) - 1)
-            B_v = (float(num) / (mean_m.shape[0] - 1)) * np.sum(np.power(mean_m - mean_v, 2), axis=0)
-            W_v = (1.0 / float(mean_m.shape[0])) * np.sum(var_m, axis=0)
-            var_given_y_v = np.add((float(num) - 1) / float(num) * W_v, (1.0 / float(num)) * B_v)
-            var_given_y_v[var_given_y_v < 0] = 0
-            R_v = np.ones(len(W_v))
-            R_non_zero_mask = W_v > 0
-            R_v[R_non_zero_mask] = np.sqrt(var_given_y_v[R_non_zero_mask] / W_v[R_non_zero_mask])
-            return (B_v, W_v, R_v, var_given_y_v)
-
-
-        #initialize Y
-
-        if self.y_corr_cholesky is not None:
-            bail("GLS not implemented yet for Gibbs sampling!")
-
-        #dimensions of matrices are (num_chains, num_gene_sets)
-
-        num_full_gene_sets = len(self.gene_sets)
-        if self.gene_sets_missing is not None:
-            num_full_gene_sets += len(self.gene_sets_missing)
-
-        beta_tilde_outlier_z_threshold = None
-
-        #this loop checks if the gibbs loop was successful and optionally
-        #aggregates multiple restart epochs as additional chains.
-        #allow bounded retry attempts beyond the target successful epochs
-        max_num_attempt_restarts = target_num_epochs + max_num_restarts
-        num_p_increases = 0
-        num_attempts = 0
-        num_completed_epochs = 0
-        remaining_total_iter = int(total_num_iter)
-
-        aggregated_sum_betas_m = []
-        aggregated_sum_betas2_m = []
-        aggregated_sum_betas_uncorrected_m = []
-        aggregated_sum_betas_uncorrected2_m = []
-        aggregated_sum_postp_m = []
-        aggregated_sum_beta_tildes_m = []
-        aggregated_sum_z_scores_m = []
-        aggregated_num_sum_beta_m = []
-
-        aggregated_sum_Ys_m = []
-        aggregated_sum_Ys2_m = []
-        aggregated_sum_Y_raws_m = []
-        aggregated_sum_log_pos_m = []
-        aggregated_sum_log_pos2_m = []
-        aggregated_sum_log_po_raws_m = []
-        aggregated_sum_log_po_raws2_m = []
-        aggregated_sum_priors_m = []
-        aggregated_sum_priors2_m = []
-        aggregated_sum_Ds_m = []
-        aggregated_sum_D_raws_m = []
-        aggregated_sum_bf_orig_m = []
-        aggregated_sum_bf_uncorrected_m = []
-        aggregated_sum_bf_orig_raw_m = []
-        aggregated_sum_bf_orig_raw2_m = []
-        aggregated_num_sum_Y_m = []
-
-        aggregated_sum_priors_missing_m = []
-        aggregated_sum_Ds_missing_m = []
-        aggregated_num_sum_priors_missing_m = []
-
-        if gene_set_stats_trace_out is not None:
-            gene_set_stats_trace_fh = open_gz(gene_set_stats_trace_out, 'w')
-            gene_set_stats_trace_fh.write("It\tChain\tGene_Set\tbeta_tilde\tP\tZ\tSE\tbeta_uncorrected\tbeta\tpostp\tbeta_tilde_outlier_z\tR\tSEM\n")
-        else:
-            gene_set_stats_trace_fh = None
-        if gene_stats_trace_out is not None:
-            gene_stats_trace_fh = open_gz(gene_stats_trace_out, 'w')
-            gene_stats_trace_fh.write("It\tChain\tGene\tprior\tcombined\tlog_bf\tD\tpercent_top\tadjust\n")
-        else:
-            gene_stats_trace_fh = None
-
-        while num_attempts < max_num_attempt_restarts and num_completed_epochs < target_num_epochs and remaining_total_iter > 0:
-
-            num_attempts += 1
-
-            #by default it succeeded
-            gibbs_good = True
-
-            epoch_max_num_iter, min_num_burn_in_for_epoch, max_num_burn_in_for_epoch, min_num_post_burn_in_for_epoch, max_num_post_burn_in_for_epoch = __resolve_epoch_iteration_budget(remaining_total_iter)
-            if epoch_max_num_iter < 1:
-                break
-            trace_chain_offset = num_completed_epochs * num_chains
-
-            #for increasing p option
-            p_scale_factor = 1 - np.log(self.p)/(2 * np.log(10))
-            min_num_iter_for_epoch = min_num_burn_in_for_epoch
-            increase_hyper_if_betas_below_for_epoch = increase_hyper_if_betas_below if num_completed_epochs == 0 else None
-            num_before_checking_p_increase = max(min_num_iter_for_epoch, min_num_burn_in_for_epoch)
-            if increase_hyper_if_betas_below_for_epoch is not None and num_before_checking_p_increase > min_num_iter_for_epoch:
-                #make sure that we always trigger this check before breaking
-                min_num_iter_for_epoch = num_before_checking_p_increase
-
-            self._record_param("num_gibbs_restarts", num_attempts - 1, overwrite=True)
-            self._record_param("num_gibbs_epochs_completed", num_completed_epochs, overwrite=True)
-            if num_attempts > 1:
-                log("Gibbs restart attempt %d" % (num_attempts - 1))
-            log("Gibbs epoch %d/%d: max_num_iter=%d, burn=[%d,%d], post=[%d,%d], remaining_total_iter=%d" % (num_completed_epochs + 1, target_num_epochs, epoch_max_num_iter, min_num_burn_in_for_epoch, max_num_burn_in_for_epoch, min_num_post_burn_in_for_epoch, max_num_post_burn_in_for_epoch, remaining_total_iter), INFO)
-            epoch_total_iter_offset = total_num_iter - remaining_total_iter
-
-            #set_to_zero_v = np.zeros(num_full_gene_sets)
-            #avg_full_betas_sample_v = np.zeros(num_full_gene_sets)
-            #avg_full_postp_sample_v = np.zeros(num_full_gene_sets)
-
-
-            #sum of values for each chain
-            #TODO: add in values for everything that has sum
-
-            full_betas_m_shape = (num_chains, num_full_gene_sets)
-            prev_warm_start_betas_m = None
-            prev_warm_start_postp_m = None
-            sum_betas_m = np.zeros(full_betas_m_shape)
-            sum_betas2_m = np.zeros(full_betas_m_shape)
-            sum_betas_uncorrected_m = np.zeros(full_betas_m_shape)
-            sum_betas_uncorrected2_m = np.zeros(full_betas_m_shape)
-            sum_postp_m = np.zeros(full_betas_m_shape)
-            sum_beta_tildes_m = np.zeros(full_betas_m_shape)
-            sum_z_scores_m = np.zeros(full_betas_m_shape)
-            num_sum_beta_m = np.zeros(full_betas_m_shape)
-
-            Y_m_shape = (num_chains, len(self.Y_for_regression))
-            sum_Ys_m = np.zeros(Y_m_shape)
-            sum_Ys2_m = np.zeros(Y_m_shape)
-            sum_Y_raws_m = np.zeros(Y_m_shape)
-            sum_log_pos_m = np.zeros(Y_m_shape)
-            sum_log_pos2_m = np.zeros(Y_m_shape)
-            sum_log_po_raws_m = np.zeros(Y_m_shape)
-            sum_log_po_raws2_m = np.zeros(Y_m_shape)
-            sum_priors_m = np.zeros(Y_m_shape)
-            sum_priors2_m = np.zeros(Y_m_shape)
-            sum_Ds_m = np.zeros(Y_m_shape)
-            sum_D_raws_m = np.zeros(Y_m_shape)
-            sum_bf_orig_m = np.zeros(Y_m_shape)
-            sum_bf_uncorrected_m = np.zeros(Y_m_shape)
-            sum_bf_orig_raw_m = np.zeros(Y_m_shape)
-            sum_bf_orig_raw2_m = np.zeros(Y_m_shape)
-            num_sum_Y_m = np.zeros(Y_m_shape)
-
-            #sums across all iterations, not just converged
-            all_sum_betas_m = np.zeros(full_betas_m_shape)
-            all_sum_betas2_m = np.zeros(full_betas_m_shape)
-            all_sum_z_scores_m = np.zeros(full_betas_m_shape)
-            all_sum_z_scores2_m = np.zeros(full_betas_m_shape)
-            all_num_sum_m = np.zeros(full_betas_m_shape)
-
-            all_sum_Ys_m = np.zeros(Y_m_shape)
-            all_sum_Ys2_m = np.zeros(Y_m_shape)
-
-            #outer-loop diagnostics state
-            in_burn_in = True
-            burn_in_pass_streak = 0
-            burn_in_rhat_history = []
-            stop_pass_streak = 0
-            R_beta_v = np.ones(full_betas_m_shape[1])
-            betas_sem2_v = np.zeros(full_betas_m_shape[1])
-            sem2_v = np.zeros(Y_m_shape[1])
-            stop_due_to_stall = False
-            stop_due_to_precision = False
-            restart_due_to_stall = False
-
-            burn_stall_best_beta_rhat_history = []
-            burn_stall_snapshots = []
-            burn_stall_beta_indices = None
-
-            post_stall_best_beta_rhat_history = []
-            post_stall_best_D_mcse_history = []
-            post_stall_snapshots = []
-            post_stall_beta_indices = None
-            post_stall_gene_indices = None
-
-            def __safe_quantile(values, q, fallback):
-                finite_values = values[np.isfinite(values)]
-                if finite_values.size == 0:
-                    return fallback
-                q = min(max(q, 0.0), 1.0)
-                return float(np.quantile(finite_values, q))
-
-            def __prepare_stall_indices(mask_v, fallback_scores_v, fallback_k):
-                if mask_v is not None and np.any(mask_v):
-                    return np.where(mask_v)[0]
-                if fallback_scores_v is None or len(fallback_scores_v) == 0:
-                    return np.array([], dtype=int)
-                k = min(max(fallback_k, 1), len(fallback_scores_v))
-                if k >= len(fallback_scores_v):
-                    return np.arange(len(fallback_scores_v))
-                return np.argpartition(-np.abs(fallback_scores_v), k - 1)[:k]
-
-            def __means_from_sums(sum_m, num_sum_m):
-                return np.divide(sum_m, np.maximum(num_sum_m, 1.0))
-
-            def __get_active_beta_mask(sum_betas_for_diag_m, num_sum_beta_for_diag_m):
-                beta_chain_means_m = __means_from_sums(sum_betas_for_diag_m, num_sum_beta_for_diag_m)
-                beta_mean_v = np.mean(beta_chain_means_m, axis=0)
-                abs_beta_mean_v = np.abs(beta_mean_v)
-
-                num_beta = len(beta_mean_v)
-                active_mask_v = np.zeros(num_beta, dtype=bool)
-                if num_beta == 0:
-                    return (active_mask_v, beta_chain_means_m, beta_mean_v)
-
-                top_k = min(max(active_beta_top_k, 1), num_beta)
-                if top_k >= num_beta:
-                    active_mask_v[:] = True
-                else:
-                    active_idx = np.argpartition(-abs_beta_mean_v, top_k - 1)[:top_k]
-                    active_mask_v[active_idx] = True
-
-                if active_beta_min_abs > 0:
-                    filtered_mask_v = np.logical_and(active_mask_v, abs_beta_mean_v >= active_beta_min_abs)
-                    if np.any(filtered_mask_v):
-                        active_mask_v = filtered_mask_v
-
-                return (active_mask_v, beta_chain_means_m, beta_mean_v)
-
-            def __reset_post_burn_in_sums():
-                sum_Ys_m[:] = 0
-                sum_Ys2_m[:] = 0
-                sum_Y_raws_m[:] = 0
-                sum_log_pos_m[:] = 0
-                sum_log_pos2_m[:] = 0
-                sum_log_po_raws_m[:] = 0
-                sum_log_po_raws2_m[:] = 0
-                sum_priors_m[:] = 0
-                sum_priors2_m[:] = 0
-                sum_Ds_m[:] = 0
-                sum_D_raws_m[:] = 0
-                sum_bf_orig_m[:] = 0
-                sum_bf_uncorrected_m[:] = 0
-                sum_bf_orig_raw_m[:] = 0
-                sum_bf_orig_raw2_m[:] = 0
-                num_sum_Y_m[:] = 0
-
-                sum_betas_m[:] = 0
-                sum_betas2_m[:] = 0
-                sum_betas_uncorrected_m[:] = 0
-                sum_betas_uncorrected2_m[:] = 0
-                sum_postp_m[:] = 0
-                sum_beta_tildes_m[:] = 0
-                sum_z_scores_m[:] = 0
-                num_sum_beta_m[:] = 0
-
-                if self.genes_missing is not None:
-                    sum_priors_missing_m[:] = 0
-                    sum_Ds_missing_m[:] = 0
-                    num_sum_priors_missing_m[:] = 0
-
-            #num_sum = 0
-
-            #sum_Ys_post_m = np.zeros(Y_m_shape)
-            #sum_Ys2_post_m = np.zeros(Y_m_shape)
-            #num_sum_post = 0
-
-            #sum across all chains
-
-            #avg_betas = np.zeros(num_full_gene_sets)
-            #avg_betas2 = np.zeros(num_full_gene_sets)
-            #avg_betas_uncorrected = np.zeros(num_full_gene_sets)
-
-            #avg_postp = np.zeros(num_full_gene_sets)
-            #avg_beta_tildes = np.zeros(num_full_gene_sets)
-            #avg_z_scores = np.zeros(num_full_gene_sets)
-            #avg_Ys = np.zeros(len(self.Y))
-            #avg_Ys2 = np.zeros(len(self.Y))
-            #avg_log_pos = np.zeros(len(self.Y))
-            #avg_log_pos2 = np.zeros(len(self.Y))
-            #avg_priors = np.zeros(len(self.Y))
-            #avg_Ds = np.zeros(len(self.Y))
-            #avg_bf_orig = np.zeros(len(self.Y))
-
-            #num_avg_beta = np.zeros(num_full_gene_sets)
-            #num_avg_Y = np.zeros(len(self.Y))
-
-            #initialize the priors
-            priors_sample_m = np.zeros(Y_m_shape)
-            priors_mean_m = np.zeros(Y_m_shape)
-
-            priors_percentage_max_sample_m = np.zeros(Y_m_shape)
-            priors_percentage_max_mean_m = np.zeros(Y_m_shape)
-            priors_adjustment_sample_m = np.zeros(Y_m_shape)
-            priors_adjustment_mean_m = np.zeros(Y_m_shape)
-
-            priors_for_Y_m = priors_sample_m
-            priors_percentage_max_for_Y_m = priors_percentage_max_sample_m
-            priors_adjustment_for_Y_m = priors_adjustment_sample_m
-            if use_mean_betas:
-                priors_for_Y_m = priors_mean_m                
-                priors_percentage_max_for_Y_m = priors_percentage_max_mean_m
-                priors_adjustment_for_Y_m = priors_adjustment_mean_m
-
-            num_genes_missing = 0
-            if self.genes_missing is not None:
-                num_genes_missing = len(self.genes_missing)
-
-            sum_priors_missing_m = np.zeros((num_chains, num_genes_missing))
-
-            sum_Ds_missing_m = np.zeros((num_chains, num_genes_missing))
-
-            #avg_priors_missing = np.zeros(num_genes_missing)
-            #avg_Ds_missing = np.zeros(num_genes_missing)
-
-            priors_missing_sample_m = np.zeros(sum_priors_missing_m.shape)
-            priors_missing_mean_m = np.zeros(sum_priors_missing_m.shape)
-            num_sum_priors_missing_m = np.zeros(sum_priors_missing_m.shape)
-
-            #TEMP STUFF
-            only_genes = None
-            only_gene_sets = None
-
-            if self.gene_sets_missing is not None:
-                revert_subset_mask = self._unsubset_gene_sets(skip_V=True)
-
-            prev_Ys_m = None
-            #cache this
-            X_hstacked = None
-            stack_batch_size = num_chains + 1
-            if num_chains > 1:
-
-                X_size_mb = self._get_X_size_mb()
-                X_h_size_mb =  num_chains * X_size_mb
-                if X_h_size_mb <= max_mb_X_h:
-                    X_hstacked = sparse.hstack([self.X_orig] * num_chains)
-                else:
-                    stack_batch_size = int(max_mb_X_h / X_size_mb)
-                    if stack_batch_size == 0:
-                        stack_batch_size = 1
-                    log("Not building X_hstacked, size would be %d > %d; will instead run %d chains at a time" % (X_h_size_mb, max_mb_X_h, stack_batch_size))
-                    X_hstacked = sparse.hstack([self.X_orig] * stack_batch_size)
-            else:
-                X_hstacked = self.X_orig
-
-            num_stack_batches = int(np.ceil(num_chains / stack_batch_size))
-
-            X_all = self.X_orig
-            if self.genes_missing is not None:
-                X_all = sparse.vstack((self.X_orig, self.X_orig_missing_genes))
-
-            for iteration_num in range(epoch_max_num_iter):
-                epoch_iter_num = iteration_num + 1
-                total_iter_num = epoch_total_iter_offset + epoch_iter_num
-
-                log("Beginning Gibbs iteration %d (global %d)" % (epoch_iter_num, total_iter_num))
-                self._record_param("num_gibbs_iter", iteration_num, overwrite=True)
-                self._record_param("num_gibbs_iter_total", total_iter_num, overwrite=True)
-
-                log("Sampling new Ys")
-
-                log("Setting logistic Ys", TRACE)
-
-                Y_sample_m = priors_for_Y_m + log_bf_m
-                Y_raw_sample_m = priors_for_Y_m + log_bf_raw_m
-                if not np.all(np.isfinite(Y_sample_m)):
-                    bail("Encountered non-finite combined Y values during Gibbs; aborting to avoid unstable beta-tilde updates")
-                y_var = np.var(Y_sample_m, axis=1)
-                if not np.all(np.isfinite(y_var)):
-                    bad_chain_v = np.where(~np.isfinite(y_var))[0] + 1
-                    bail("Encountered non-finite Y variance in Gibbs chain(s): %s" % ",".join([str(x) for x in bad_chain_v]))
-                low_var_mask = y_var <= 0
-                if np.any(low_var_mask):
-                    y_var[low_var_mask] = 1e-12
-                    log("Applied Y variance floor for %d chain(s) with non-positive combined-Y variance" % np.sum(low_var_mask), DEBUG)
-
-                #if adjust_background_prior:
-                #    #get the original mean bf
-                #    background_log_prior_scale_factor = np.mean(Y_sample_m, axis=1) - np.mean(log_bf_orig_m, axis=1)
-                #    cur_background_log_bf_v = self.background_log_bf + background_log_prior_scale_factor
-                #    cur_background_bf_v = np.exp(cur_background_log_bf_v)
-                #    log("Adjusting background priors to %.4g-%.4g" % (np.min(cur_background_bf_v / (1 + cur_background_bf_v)), np.max(cur_background_bf_v / (1 + cur_background_bf_v))))
-
-                #threshold in case things go off the rails
-                max_log = 15
-
-                cur_log_bf_m = Y_sample_m.T + cur_background_log_bf_v
-                cur_log_bf_m[cur_log_bf_m > max_log] = max_log
-                bf_sample_m = np.exp(cur_log_bf_m).T
-
-                cur_log_bf_raw_m = Y_raw_sample_m.T + cur_background_log_bf_v
-                cur_log_bf_raw_m[cur_log_bf_raw_m > max_log] = max_log
-                bf_raw_sample_m = np.exp(cur_log_bf_raw_m).T
-
-                #FIXME: do we really need to add in background_log_bf and then subtract it below? Surely there must be a way to do these calculations independent of background_log_bf? Can check by seeing if results are invariant to background_log_bf
-                max_D = 1-1e-5
-                min_D = 1e-5
-
-                D_sample_m = bf_sample_m / (1 + bf_sample_m)
-                D_sample_m[D_sample_m > max_D] = max_D
-                D_sample_m[D_sample_m < min_D] = min_D
-                log_po_sample_m = np.log(D_sample_m/(1-D_sample_m))
-
-                D_raw_sample_m = bf_raw_sample_m / (1 + bf_raw_sample_m)
-                D_raw_sample_m[D_raw_sample_m > max_D] = max_D
-                D_raw_sample_m[D_raw_sample_m < min_D] = min_D
-                log_po_raw_sample_m = np.log(D_raw_sample_m/(1-D_raw_sample_m))
-
-                #if center_combined:
-                #    #recenter the log_pos and Ds as well
-                #    #the "combined missing" is just the priors
-                #    log_po_sample_total_m = np.hstack((log_po_sample_m, priors_missing_sample_m))
-                #    total_po_mean_v = np.mean(log_po_sample_total_m, axis=1)
-                #    log_po_sample_m = (log_po_sample_m.T - total_po_mean_v).T
-                #    bf_sample_m = np.exp(log_po_sample_m.T + cur_background_log_bf_v).T
-                #    D_sample_m = bf_sample_m / (1 + bf_sample_m)
-                #else:
-                #    log("Not centering combined")
-
-
-                # Keep Y_sample_m on the original log-odds scale.
-                # _compute_beta_tildes handles mean-centering internally.
-
-                #var(Y) = E[var(Y|S,beta)] + var(E[Y|S,beta])
-                #First term can be estimated from the gibbs samples
-                #Second term is just Y_cond_var (to a first approximation), or more accurately the term in the integral from gauss
-                #Third term is the term we estimate from the Gauss seidel regression
-                #So: if we use
-                #y_var = np.var(Y_sample_m, axis=1)
-                #the term we want, var(Y|S,beta) is being overestimated for gibbs, underestimated for gauss seidel
-                #Let's first try Gauss seidel with correction, then try Gibbs with the first approximation (see the difference)
-                #This is what is implemented above in Y_var_m -- gives conditional variance of each Y
-                #Taking mean of this is our other estimate
-
-                #sample from beta
-
-                #combine X_orig and X_orig missing?
-
-                #TODO: y_corr_sparse needs to be reduced due to y_var (it is larger here than it is above)
-                #TODO: if decide calculations depend on chain, then also need to update compute_beta_tildes to return matrix of se_inflation_factors
-                y_corr_sparse = None
-                if self.y_corr_sparse is not None:
-
-                    log("Adjusting correlation matrix")
-
-                    y_corr_sparse = copy.copy(self.y_corr_sparse)
-
-                    #lower the correlation to account for the 
-                    y_corr_sparse = y_corr_sparse.multiply(y_var_orig)
-
-                    #new variances
-                    new_y_sd = np.sqrt(np.square(np.mean(priors_for_Y_m, axis=0)) + y_var_orig)[np.newaxis,:]
-                    new_y_sd[new_y_sd == 0] = 1e-10
-
-                    y_corr_sparse = y_corr_sparse.multiply(1/new_y_sd.T)
-                    y_corr_sparse = y_corr_sparse.multiply(1/new_y_sd)
-                    y_corr_sparse.setdiag(1)
-
-                    y_corr_sparse = y_corr_sparse.tocsc()
-
-
-                #NOW ONTO GENE SETS
-
-                def __get_gene_set_mask(uncorrected_betas_mean_m, uncorrected_betas_sample_m, p_values_m, sparse_frac=0.01, sparse_max=0.001):
-                    #if desired, add back in option to set to sample
-                    #uncorrected_betas_m = uncorrected_betas_sample_m
-
-                    uncorrected_betas_m = uncorrected_betas_mean_m
-
-                    gene_set_mask_m = uncorrected_betas_m != 0
-
-                    if sparse_frac is not None:
-                        #this triggers three things
-                        #1. Only gene sets above this threshold are considered for full analysis
-                        gene_set_mask_m = np.logical_and(gene_set_mask_m, (np.abs(uncorrected_betas_m).T >= sparse_frac * np.max(np.abs(uncorrected_betas_m), axis=1)).T)
-                        #2. Or if below this max cap
-                        gene_set_mask_m = np.logical_and(gene_set_mask_m, (np.abs(uncorrected_betas_m).T >= sparse_max).T)
-
-                        #3. The uncorrected values for sampling next iteration are also zeroed out
-                        uncorrected_betas_sample_m[~gene_set_mask_m] = 0
-                        #4. The mean values (which are added to the estimate) are also zeroed out
-                        uncorrected_betas_mean_m[~gene_set_mask_m] = 0
-
-                    if np.sum(gene_set_mask_m) == 0:
-                        gene_set_mask_m = p_values_m <= np.min(p_values_m)
-                    return gene_set_mask_m
-
-
-                full_scale_factors_m = np.tile(self.scale_factors, num_chains).reshape((num_chains, len(self.scale_factors)))
-                full_mean_shifts_m = np.tile(self.mean_shifts, num_chains).reshape((num_chains, len(self.mean_shifts)))
-                full_is_dense_gene_set_m = np.tile(self.is_dense_gene_set, num_chains).reshape((num_chains, len(self.is_dense_gene_set)))
-                full_ps_m = None
-                if self.ps is not None:
-                    full_ps_m = np.tile(self.ps, num_chains).reshape((num_chains, len(self.ps)))
-                full_sigma2s_m = None
-                if self.sigma2s is not None:
-                    full_sigma2s_m = np.tile(self.sigma2s, num_chains).reshape((num_chains, len(self.sigma2s)))
-
-                #we have to keep local replicas here because unsubset does not restore the original order, which would break full_beta_tildes and full_betas
-
-                p_sample_m = copy.copy(Y_sample_m)
-
-                pre_gene_set_filter_mask = None
-                full_z_cur_beta_tildes_m = np.zeros(full_betas_m_shape)
-
-                #have to do logistic or else doesn't converge
-                #if run_logistic:
-                if True:
-                    if not gauss_seidel:
-                        log("Sampling Ds for logistic", TRACE)
-                        p_sample_m = np.zeros(D_sample_m.shape)
-                        p_sample_m[np.random.random(D_sample_m.shape) < D_sample_m] = 1
-
-                    else:
-                        log("Setting Ds to mean probabilities", TRACE)
-                        p_sample_m = D_sample_m
-
-                    if initial_linear_filter:
-                        (linear_beta_tildes_m, linear_ses_m, linear_z_scores_m, linear_p_values_m, linear_se_inflation_factors_m) = self._compute_beta_tildes(self.X_orig, Y_sample_m, y_var, self.scale_factors, self.mean_shifts, resid_correlation_matrix=y_corr_sparse)
-                        (linear_uncorrected_betas_sample_m, linear_uncorrected_postp_sample_m, linear_uncorrected_betas_mean_m, linear_uncorrected_postp_mean_m) = self._calculate_non_inf_betas(assume_independent=True, initial_p=None, beta_tildes=linear_beta_tildes_m, ses=linear_ses_m, V=None, X_orig=None, scale_factors=full_scale_factors_m, mean_shifts=full_mean_shifts_m, is_dense_gene_set=full_is_dense_gene_set_m, ps=full_ps_m, sigma2s=full_sigma2s_m, return_sample=True, max_num_burn_in=passed_in_max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, debug_gene_sets=self.gene_sets)
-                        pre_gene_set_filter_mask_m = __get_gene_set_mask(linear_uncorrected_betas_mean_m, linear_uncorrected_betas_sample_m, linear_p_values_m, sparse_frac=sparse_frac_gibbs, sparse_max=sparse_max_gibbs)
-                        pre_gene_set_filter_mask = np.any(pre_gene_set_filter_mask_m, axis=0)
-
-                        log("Filtered down to %d gene sets using linear pre-filtering" % np.sum(pre_gene_set_filter_mask))
-                    else:
-                        pre_gene_set_filter_mask = np.full(full_beta_tildes_m.shape[1], True)
-
-
-                    full_beta_tildes_m = np.zeros(full_betas_m_shape)
-                    full_ses_m = np.zeros(full_betas_m_shape)
-                    full_z_scores_m = np.zeros(full_betas_m_shape)
-                    full_p_values_m = np.zeros(full_betas_m_shape)
-                    se_inflation_factors_m = np.zeros(full_betas_m_shape)
-                    full_alpha_tildes_m = np.zeros(full_betas_m_shape)
-                    diverged_m = np.full(full_betas_m_shape, False)
-
-                    for batch in range(num_stack_batches):
-                        begin = batch * stack_batch_size
-                        end = (batch + 1) * stack_batch_size
-                        if end > num_chains:
-                            end = num_chains
-
-                        log("Batch %d: chains %d-%d" % (batch, begin, end), TRACE)
-                        num_cur_stack = (end - begin)
-                        if num_cur_stack == stack_batch_size:
-                            cur_X_hstacked = X_hstacked
-                        else:
-                            cur_X_hstacked = sparse.hstack([self.X_orig] * num_cur_stack)
-
-                        stack_mask = np.tile(pre_gene_set_filter_mask, num_cur_stack)
-
-                        (full_beta_tildes_m[begin:end,pre_gene_set_filter_mask], full_ses_m[begin:end,pre_gene_set_filter_mask], full_z_scores_m[begin:end,pre_gene_set_filter_mask], full_p_values_m[begin:end,pre_gene_set_filter_mask], init_se_inflation_factors_m, full_alpha_tildes_m[begin:end,pre_gene_set_filter_mask], diverged_m[begin:end,pre_gene_set_filter_mask]) = self._compute_logistic_beta_tildes(self.X_orig[:,pre_gene_set_filter_mask], p_sample_m[begin:end,:], self.scale_factors[pre_gene_set_filter_mask], self.mean_shifts[pre_gene_set_filter_mask], resid_correlation_matrix=y_corr_sparse, X_stacked=cur_X_hstacked[:,stack_mask])
-
-                        full_ses_m[begin:end,~pre_gene_set_filter_mask] = 100
-                        full_p_values_m[begin:end,~pre_gene_set_filter_mask] = 1
-
-                        if init_se_inflation_factors_m is not None:
-                            se_inflation_factors_m[begin:end,pre_gene_set_filter_mask] = init_se_inflation_factors_m
-                        else:
-                            se_inflation_factors_m = None
-
-                    #old unconditional one; shouldn't be necessary
-                    #else:
-                    #    (full_beta_tildes_m, full_ses_m, full_z_scores_m, full_p_values_m, se_inflation_factors_m, full_alpha_tildes_m, diverged_m) = self._compute_logistic_beta_tildes(self.X_orig, p_sample_m, self.scale_factors, self.mean_shifts, resid_correlation_matrix=y_corr_sparse, X_stacked=X_hstacked)
-                    #    pre_gene_set_filter_mask = np.full(full_beta_tildes_m.shape[1], True)
-
-                    #calculate whether the sample was an outlier
-
-                    if beta_tilde_outlier_z_threshold is not None:
-                        self._record_param("beta_tilde_outlier_z_threshold", beta_tilde_outlier_z_threshold)
-
-                        mean_for_outlier_m = np.zeros(all_sum_z_scores_m.shape)
-                        mean2_for_outlier_m = np.zeros(all_sum_z_scores_m.shape)
-                        se_for_outlier_m = np.zeros(all_sum_z_scores_m.shape)
-                        z_for_outlier_m = np.zeros(all_sum_z_scores_m.shape)
-                        num_for_outlier_m = np.zeros(all_sum_z_scores_m.shape)
-
-                        #calculate mean_m as mean ignoring the current chain
-                        mean_for_outlier_m = np.sum(all_sum_z_scores_m, axis=0) - all_sum_z_scores_m
-                        mean2_for_outlier_m = np.sum(all_sum_z_scores2_m, axis=0) - all_sum_z_scores2_m
-                        num_for_outlier_m = np.sum(all_num_sum_m, axis=0) - all_num_sum_m
-                        num_for_outlier_non_zero_mask_m = num_for_outlier_m > 0
-                        mean_for_outlier_m[num_for_outlier_non_zero_mask_m] = mean_for_outlier_m[num_for_outlier_non_zero_mask_m] / num_for_outlier_m[num_for_outlier_non_zero_mask_m]
-                        mean2_for_outlier_m[num_for_outlier_non_zero_mask_m] = mean2_for_outlier_m[num_for_outlier_non_zero_mask_m] / num_for_outlier_m[num_for_outlier_non_zero_mask_m]
-
-                        se_for_outlier_m[num_for_outlier_non_zero_mask_m] = np.sqrt(mean2_for_outlier_m[num_for_outlier_non_zero_mask_m] - np.square(mean_for_outlier_m[num_for_outlier_non_zero_mask_m]))
-
-                        se_for_outlier_mask_m = se_for_outlier_m > 0
-                        full_z_cur_beta_tildes_m[se_for_outlier_mask_m] = (full_z_scores_m[se_for_outlier_mask_m] - mean_for_outlier_m[se_for_outlier_mask_m]) / se_for_outlier_m[se_for_outlier_mask_m]
-                        outlier_mask_m = full_z_cur_beta_tildes_m > beta_tilde_outlier_z_threshold
-
-                        if np.sum(outlier_mask_m) > 0:
-                            log("Detected %d outlier gene sets: %s" % (np.sum(outlier_mask_m), ",".join([self.gene_sets[i] for i in np.where(np.any(outlier_mask_m, axis=0))[0]])),DEBUG)
-
-                            outlier_control = False
-                            if outlier_control:
-                                #inflate them
-                                #full_beta_tildes_m[outlier_mask_m] / full_ses_m[outlier_mask_m] - mean_for_outlier_m[outlier_mask_m] = beta_tilde_outlier_z_threshold * se_for_outlier_m[outlier_mask_m]
-                                #full_beta_tildes_m[outlier_mask_m] / full_ses_m[outlier_mask_m] = mean_for_outlier_m[outlier_mask_m] + beta_tilde_outlier_z_threshold * se_for_outlier_m[outlier_mask_m]
-                                #full_beta_tildes_m[outlier_mask_m] = full_ses_m[outlier_mask_m] * (mean_for_outlier_m[outlier_mask_m] + beta_tilde_outlier_z_threshold * se_for_outlier_m[outlier_mask_m])
-
-                                new_ses_m = np.abs(full_beta_tildes_m[outlier_mask_m] / (mean_for_outlier_m[outlier_mask_m] + beta_tilde_outlier_z_threshold * se_for_outlier_m[outlier_mask_m]))
-                                log("Inflated ses from %.3g - %.3g" % (np.min(new_ses_m / full_ses_m[outlier_mask_m]), np.max(new_ses_m / full_ses_m[outlier_mask_m])), TRACE)
-
-                                full_ses_m[outlier_mask_m] = new_ses_m
-                                full_z_scores_m[outlier_mask_m] = full_beta_tildes_m[outlier_mask_m] / new_ses_m
-                                full_p_values_m[outlier_mask_m] = 2*scipy.stats.norm.cdf(-np.abs(full_z_scores_m[outlier_mask_m]))
-
-                            else:
-
-                                #first check if we need to reset entire chains
-                                num_outliers = np.sum(outlier_mask_m, axis=1)
-                                frac_outliers = num_outliers / outlier_mask_m.shape[1]
-                                chain_outlier_frac_threshold = 0.0005
-                                outlier_chains = frac_outliers > chain_outlier_frac_threshold
-                                for outlier_chain in np.where(outlier_chains)[0]:
-                                    log("Detected entire chain %d as an outlier since it had %d (%.4g fraction) outliers" % (outlier_chain+1,num_outliers[outlier_chain], frac_outliers[outlier_chain]), DEBUG)
-                                    if np.sum(~outlier_chains) > 0:
-                                        replacement_chain = np.random.choice(np.where(~outlier_chains)[0], size=1)
-                                        for matrix in [full_beta_tildes_m, full_ses_m, full_z_scores_m, full_p_values_m, se_inflation_factors_m, full_alpha_tildes_m, diverged_m]:
-                                            if matrix is not None:
-                                                matrix[outlier_chain,:] = matrix[replacement_chain,:]
-                                        outlier_mask_m[outlier_chain,:] = False
-
-                                    else:
-                                        log("Everything was an outlier chain so doing nothing", DEBUG)
-
-                                outlier_gene_sets = np.any(outlier_mask_m, axis=0)
-                                for outlier_gene_set in np.where(outlier_gene_sets)[0]:
-                                    non_outliers = ~outlier_mask_m[:,outlier_gene_set]
-                                    if np.sum(non_outliers) > 0:
-                                        log("Resetting %s chain %s; beta_tilde=%s and z=%s" % (self.gene_sets[outlier_gene_set], np.where(outlier_mask_m[:,outlier_gene_set])[0] + 1, full_beta_tildes_m[outlier_mask_m[:,outlier_gene_set],outlier_gene_set], full_z_cur_beta_tildes_m[outlier_mask_m[:,outlier_gene_set],outlier_gene_set]),DEBUG)
-
-                                        replacement_chains = np.random.choice(np.where(non_outliers)[0], size=np.sum(outlier_mask_m[:,outlier_gene_set]))
-                                        for matrix in [full_beta_tildes_m, full_ses_m, full_z_scores_m, full_p_values_m, se_inflation_factors_m, full_alpha_tildes_m, diverged_m]:
-                                            if matrix is not None:
-                                                matrix[outlier_mask_m[:,outlier_gene_set],outlier_gene_set] = matrix[replacement_chains,outlier_gene_set]
-
-                                        #now make the Z threshold more lenient
-                                        #beta_tilde_outlier_z_threshold[outlier_gene_set] = -scipy.stats.norm.ppf(scipy.stats.norm.cdf(-np.abs(beta_tilde_outlier_z_threshold[outlier_gene_set])) / 10)
-                                        #log("New threshold is z=%.4g" % beta_tilde_outlier_z_threshold[outlier_gene_set], TRACE)
-
-                                    else:
-                                        log("Everything was an outlier for gene set %s so doing nothing" % (self.gene_sets[outlier_gene_set]), DEBUG)
-
-                    else:
-                        full_z_cur_beta_tildes_m = np.zeros(full_beta_tildes_m.shape)
-
-
-                    if np.sum(diverged_m) > 0:
-                        for c in range(diverged_m.shape[0]):
-                            if np.sum(diverged_m[c,:] > 0):
-                                for p in np.nditer(np.where(diverged_m[c,:])):
-                                    log("Chain %d: gene set %s diverged" % (c+1, self.gene_sets[p]), DEBUG)
-                #else:
-                #    (full_beta_tildes_m, full_ses_m, full_z_scores_m, full_p_values_m, se_inflation_factors_m) = self._compute_beta_tildes(self.X_orig, Y_sample_m, y_var, self.scale_factors, self.mean_shifts, resid_correlation_matrix=y_corr_sparse)
-
-                if correct_betas_mean or correct_betas_var:
-                    (full_beta_tildes_m, full_ses_m, full_z_scores_m, full_p_values_m, se_inflation_factors_m) = self._correct_beta_tildes(full_beta_tildes_m, full_ses_m, se_inflation_factors_m, self.total_qc_metrics, self.total_qc_metrics_directions, correct_mean=correct_betas_mean, correct_var=correct_betas_var, fit=False)
-
-
-                #now write the gene stats trace
-
-                if gene_stats_trace_out is not None:
-                    log("Writing gene stats trace", TRACE)
-                    for chain_num in range(num_chains):
-                        for i in range(len(self.genes)):
-                            if only_genes is None or self.genes[i] in only_genes:
-                                gene_stats_trace_fh.write("%d\t%d\t%s\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\n" % (iteration_num+1, trace_chain_offset + chain_num + 1, self.genes[i], priors_for_Y_m[chain_num,i], Y_sample_m[chain_num,i], log_bf_m[chain_num,i], p_sample_m[chain_num,i], priors_percentage_max_for_Y_m[chain_num,i], priors_adjustment_for_Y_m[chain_num,i]))
-                        #if self.genes_missing is not None:
-                        #    for i in range(len(self.genes_missing)):
-                        #        if only_genes is None or self.genes[i] in only_genes:
-                        #            gene_stats_trace_fh.write("%d\t%d\t%s\t%.4g\t%s\t%s\t%s\n" % (iteration_num+1, chain_num+1, self.genes_missing[i], priors_missing_sample_m[chain_num,i], "NA", "NA", "NA"))
-
-                    gene_stats_trace_fh.flush()
-
-                (uncorrected_betas_sample_m, uncorrected_postp_sample_m, uncorrected_betas_mean_m, uncorrected_postp_mean_m) = self._calculate_non_inf_betas(assume_independent=True, initial_p=None, beta_tildes=full_beta_tildes_m, ses=full_ses_m, V=None, X_orig=None, scale_factors=full_scale_factors_m, mean_shifts=full_mean_shifts_m, is_dense_gene_set=full_is_dense_gene_set_m, ps=full_ps_m, sigma2s=full_sigma2s_m, return_sample=True, max_num_burn_in=passed_in_max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, debug_gene_sets=self.gene_sets)
-
-                #initial values to use
-                #we will overwrite these with the corrected betas
-                #but, if we decide to filter them out due to sparsity, we'll persist with the (small) uncorrected values
-                default_betas_sample_m = copy.copy(uncorrected_betas_sample_m)
-                default_postp_sample_m = copy.copy(uncorrected_postp_sample_m)
-                default_betas_mean_m = copy.copy(uncorrected_betas_mean_m)
-                default_postp_mean_m = copy.copy(uncorrected_postp_mean_m)
-
-                #filter back down based on max p?
-                gene_set_mask_m = np.full(full_p_values_m.shape, True)
-
-                #no longer an option
-                #if self.max_gene_set_p is not None and use_orig_gene_set_p:
-                #    gene_set_mask_m = np.tile(self.p_values_orig <= self.max_gene_set_p, num_chains).reshape((num_chains, len(gene_set_mask)))
-
-                gene_set_mask_m = __get_gene_set_mask(uncorrected_betas_mean_m, uncorrected_betas_sample_m, full_p_values_m, sparse_frac=sparse_frac_gibbs, sparse_max=sparse_max_gibbs)
-                any_gene_set_mask = np.any(gene_set_mask_m, axis=0)
-                if pre_filter_batch_size is not None and np.sum(any_gene_set_mask) > pre_filter_batch_size:
-                    num_batches = self._get_num_X_blocks(self.X_orig[:,any_gene_set_mask], batch_size=pre_filter_small_batch_size)
-                    if num_batches > 1:
-                        #try to run with small batches to see if we can zero out more
-                        gene_set_block_masks = self._compute_gene_set_batches(V=None, X_orig=self.X_orig[:,any_gene_set_mask], mean_shifts=self.mean_shifts[any_gene_set_mask], scale_factors=self.scale_factors[any_gene_set_mask], find_correlated_instead=pre_filter_small_batch_size)
-
-                        if len(gene_set_block_masks) > 0:
-                            if np.sum(gene_set_block_masks[-1]) == 1 and len(gene_set_block_masks) > 1:
-                                #merge singletons at the end into the one before
-                                gene_set_block_masks[-2][gene_set_block_masks[-1]] = True
-                                gene_set_block_masks = gene_set_block_masks[:-1]
-                            if len(gene_set_block_masks) > 1 and np.sum(gene_set_block_masks[0]) > 1:
-                                #find map of indices to original indices
-                                V_data = []
-                                V_rows = []
-                                V_cols = []
-                                for gene_set_block_mask in gene_set_block_masks:
-                                    V_block = self._calculate_V_internal(self.X_orig[:,any_gene_set_mask][:,gene_set_block_mask], self.y_corr_cholesky, self.mean_shifts[any_gene_set_mask][gene_set_block_mask], self.scale_factors[any_gene_set_mask][gene_set_block_mask])
-                                    orig_indices = np.where(gene_set_block_mask)[0]
-                                    V_rows += list(np.repeat(orig_indices, V_block.shape[0]))
-                                    V_cols += list(np.tile(orig_indices, V_block.shape[0]))
-                                    V_data += list(V_block.ravel())
-
-                                V_sparse = sparse.csc_matrix((V_data, (V_rows, V_cols)), shape=(np.sum(any_gene_set_mask), np.sum(any_gene_set_mask)))
-                                log("Running %d blocks to check for zeros..." % len(gene_set_block_masks),DEBUG)
-                                (half_corrected_betas_sample_m, half_corrected_postp_sample_m, half_corrected_betas_mean_m, half_corrected_postp_mean_m) = self._calculate_non_inf_betas(initial_p=None, beta_tildes=full_beta_tildes_m[:,any_gene_set_mask], ses=full_ses_m[:,any_gene_set_mask], V=V_sparse, X_orig=None, scale_factors=full_scale_factors_m[:,any_gene_set_mask], mean_shifts=full_mean_shifts_m[:,any_gene_set_mask], is_dense_gene_set=full_is_dense_gene_set_m[:,any_gene_set_mask], ps=full_ps_m[:,any_gene_set_mask], sigma2s=full_sigma2s_m[:,any_gene_set_mask], return_sample=True, max_num_burn_in=passed_in_max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas)
-
-                                add_zero_mask_m = ~(__get_gene_set_mask(half_corrected_betas_mean_m, half_corrected_betas_sample_m, full_p_values_m, sparse_frac=sparse_frac_gibbs, sparse_max=sparse_max_gibbs))
-
-                                if np.any(add_zero_mask_m):
-                                    #need to convert these to the original gene sets
-                                    map_to_full = np.where(any_gene_set_mask)[0]
-                                    #get rows and then columns in subsetted
-                                    set_to_zero_full = np.where(add_zero_mask_m)
-                                    #map columns in subsetted to original
-                                    set_to_zero_full = (set_to_zero_full[0], map_to_full[set_to_zero_full[1]])
-                                    orig_zero = np.sum(np.any(gene_set_mask_m, axis=0))
-                                    gene_set_mask_m[set_to_zero_full] = False
-                                    new_zero = np.sum(np.any(gene_set_mask_m, axis=0))
-                                    log("Found %d additional zero gene sets" % (orig_zero - new_zero),DEBUG)
-
-                                    #need to update uncorrected ones too
-                                    default_betas_sample_m[set_to_zero_full] = half_corrected_betas_sample_m[add_zero_mask_m]
-                                    default_postp_sample_m[set_to_zero_full] = half_corrected_postp_sample_m[add_zero_mask_m]
-                                    default_betas_mean_m[set_to_zero_full] = half_corrected_betas_mean_m[add_zero_mask_m]
-                                    default_postp_mean_m[set_to_zero_full] = half_corrected_postp_mean_m[add_zero_mask_m]
-
-                if sum(np.any(gene_set_mask_m, axis=0)) == 0:
-                    gene_set_mask_m[:,0] = 1
-
-                num_non_missing_v = np.sum(gene_set_mask_m, axis=1)
-                max_num_non_missing = np.max(num_non_missing_v)
-                max_num_non_missing_idx = np.argmax(num_non_missing_v)
-                log("Max number of gene sets to keep across all chains is %d" % (max_num_non_missing))
-                log("Keeping %d gene sets that had non-zero uncorected betas" % (sum(np.any(gene_set_mask_m, axis=0))))
-                for chain_num in range(gene_set_mask_m.shape[0]):
-                    if num_non_missing_v[chain_num] < max_num_non_missing:
-                        cur_num = 0
-                        #add in gene sets that are in the max one to ensure things are square
-                        for index in np.nonzero(gene_set_mask_m[max_num_non_missing_idx,:] & ~gene_set_mask_m[chain_num,:])[0]:
-                            assert(gene_set_mask_m[chain_num,index] == False)
-                            gene_set_mask_m[chain_num,index] = True
-                            cur_num += 1
-                            if cur_num >= max_num_non_missing - num_non_missing_v[chain_num]:
-                                break
-
-                #log("Keeping %d gene sets that passed threshold of p<%.3g" % (sum(gene_set_mask), self.max_gene_set_p))
-
-
-                #Now call betas in batches
-                #we are doing this only for memory reasons -- we have to create a V matrix for each chain
-                #it is furthermore faster to create a V once for all gene sets across all chains, and then subset it for each chain, which
-                #further increases memory
-                #so, the strategy is to batch the chains, for each batch calculate a V for the superset of all gene sets, and then subset it
-
-                #betas
-                if options.debug_zero_sparse:
-                    full_betas_mean_m = copy.copy(default_betas_mean_m)
-                    full_betas_sample_m = copy.copy(default_betas_sample_m)
-                    full_postp_mean_m = copy.copy(default_postp_mean_m)
-                    full_postp_sample_m = copy.copy(default_postp_sample_m)
-                else:
-                    full_betas_mean_m = np.zeros(default_betas_mean_m.shape)
-                    full_betas_sample_m = np.zeros(default_betas_sample_m.shape)
-                    full_postp_mean_m = np.zeros(default_postp_mean_m.shape)
-                    full_postp_sample_m = np.zeros(default_postp_sample_m.shape)
-
-                num_calculations = int(np.ceil(num_chains / num_batches_parallel))
-                #we will default all to the uncorrected sample, and then replace those below that are non-zero
-                for calc in range(num_calculations):
-                    begin = calc * num_batches_parallel
-                    end = (calc + 1) * num_batches_parallel
-                    if end > num_chains:
-                        end = num_chains
-
-                    #get the include mask; any batch has p <= threshold
-                    cur_gene_set_mask = np.any(gene_set_mask_m[begin:end,:], axis=0)
-                    num_gene_set_mask = np.sum(cur_gene_set_mask)
-                    max_num_gene_set_mask = np.max(np.sum(gene_set_mask_m, axis=1))
-
-                    #construct the V matrix
-                    V_superset = self._calculate_V_internal(self.X_orig[:,cur_gene_set_mask], self.y_corr_cholesky, self.mean_shifts[cur_gene_set_mask], self.scale_factors[cur_gene_set_mask])
-
-
-                    #empirically it is faster to do one V if the total is less than 5x the max
-                    run_one_V = num_gene_set_mask < 5 * max_num_gene_set_mask
-
-                    if run_one_V:
-                        num_non_missing = np.sum(cur_gene_set_mask)
-                    else:
-                        num_non_missing = np.max(np.sum(gene_set_mask_m, axis=1))
-
-                    num_missing = gene_set_mask_m.shape[1] - num_non_missing
-
-                    #fraction_non_missing = float(num_non_missing) / gene_set_mask_m.shape[1]
-                    #missing_scale_factor = self._get_fraction_non_missing() / fraction_non_missing
-
-                    #if missing_scale_factor > 1 / self.p:
-                    #    #threshold this here. otherwise set_p will cap p but set_sigma won't cap sigma
-                    #    missing_scale_factor = 1 / self.p
-
-                    if run_one_V:
-                        beta_tildes_m = full_beta_tildes_m[begin:end,cur_gene_set_mask]
-                        ses_m = full_ses_m[begin:end,cur_gene_set_mask]
-                        V_m=V_superset
-                        scale_factors_m = self.scale_factors[cur_gene_set_mask]
-                        mean_shifts_m = self.mean_shifts[cur_gene_set_mask]
-                        is_dense_gene_set_m = self.is_dense_gene_set[cur_gene_set_mask]
-                        ps_m = None
-                        if self.ps is not None:
-                            ps_m = self.ps[cur_gene_set_mask]
-                        sigma2s_m = None
-                        if self.sigma2s is not None:
-                            sigma2s_m = self.sigma2s[cur_gene_set_mask]
-
-                        init_betas_m = None
-                        init_postp_m = None
-                        if warm_start and prev_warm_start_betas_m is not None:
-                            init_betas_m = prev_warm_start_betas_m[begin:end,cur_gene_set_mask]
-                            init_postp_m = prev_warm_start_postp_m[begin:end,cur_gene_set_mask]
-
-
-                        #beta_tildes_missing_m = full_beta_tildes_m[begin:end,~cur_gene_set_mask]
-                        #ses_missing_m = full_ses_m[begin:end,~cur_gene_set_mask]
-                        #scale_factors_missing_m = self.scale_factors[~cur_gene_set_mask]
-
-                    else:
-                        non_missing_matrix_shape = (num_chains, num_non_missing)
-                        beta_tildes_m = full_beta_tildes_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        ses_m = full_ses_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        scale_factors_m = full_scale_factors_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        mean_shifts_m = full_mean_shifts_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        is_dense_gene_set_m = full_is_dense_gene_set_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        ps_m = None
-                        if full_ps_m is not None:
-                            ps_m = full_ps_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                        sigma2s_m = None
-                        if full_sigma2s_m is not None:
-                            sigma2s_m = full_sigma2s_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-
-                        init_betas_m = None
-                        init_postp_m = None
-                        if warm_start and prev_warm_start_betas_m is not None:
-                            init_betas_m = prev_warm_start_betas_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-                            init_postp_m = prev_warm_start_postp_m[gene_set_mask_m].reshape(non_missing_matrix_shape)[begin:end,:]
-
-                        V_m = np.zeros((end-begin, beta_tildes_m.shape[1], beta_tildes_m.shape[1]))
-                        for i,j in zip(range(begin, end),range(end-begin)):
-                            #gene_set_mask_m[i,:] is the current batch mask, with dimensions num_gene_sets
-                            #to index into V_superset, we need to subset it down to cur_gene_set_mask
-                            gene_set_mask_subset = gene_set_mask_m[i,cur_gene_set_mask]
-                            V_m[j,:,:] = V_superset[gene_set_mask_subset,:][:,gene_set_mask_subset]
-
-                        #missing_matrix_shape = (num_chains, num_missing)
-                        #beta_tildes_missing_m = full_beta_tildes_m[~gene_set_mask_m].reshape(missing_matrix_shape)[begin:end,:]
-                        #ses_missing_m = full_ses_m[~gene_set_mask_m].reshape(missing_matrix_shape)[begin:end,:]
-                        #scale_factors_missing_m = full_scale_factors_m[~gene_set_mask_m].reshape(missing_matrix_shape)[begin:end,:]
-
-                    (cur_betas_sample_m, cur_postp_sample_m, cur_betas_mean_m, cur_postp_mean_m) = self._calculate_non_inf_betas(initial_p=None, beta_tildes=beta_tildes_m, ses=ses_m, V=V_m, scale_factors=scale_factors_m, mean_shifts=mean_shifts_m, is_dense_gene_set=is_dense_gene_set_m, ps=ps_m, sigma2s=sigma2s_m, return_sample=True, max_num_burn_in=passed_in_max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, num_missing_gene_sets=num_missing, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, betas_trace_out=betas_trace_out, debug_gene_sets=[self.gene_sets[i] for i in range(len(self.gene_sets)) if gene_set_mask_m[0,i]], init_betas=init_betas_m, init_postp=init_postp_m)
-
-                    #store the values with zeros appended in order to add to sum_betas_m below
-                    if run_one_V:
-                        full_betas_sample_m[begin:end,cur_gene_set_mask] = cur_betas_sample_m
-                        full_postp_sample_m[begin:end,cur_gene_set_mask] = cur_postp_sample_m
-                        full_betas_mean_m[begin:end,cur_gene_set_mask] = cur_betas_mean_m
-                        full_postp_mean_m[begin:end,cur_gene_set_mask] = cur_postp_mean_m
-
-                        #handy option for debugging
-                        print_overlapping = None
-                        if print_overlapping is not None:
-                            gene_sets_run = [self.gene_sets[i] for i in range(len(self.gene_sets)) if cur_gene_set_mask[i]]
-                            gene_set_to_ind = self._construct_map_to_ind(gene_sets_run)
-                            for gene_set in print_overlapping:
-                                if gene_set in gene_set_to_ind:
-                                    log("For gene set %s" % (gene_set))
-                                    ind = gene_set_to_ind[gene_set]
-                                    values = V_m[ind,:] * (cur_betas_mean_m if use_mean_betas else cur_betas_sample_m)
-                                    indices = np.argsort(values, axis=1)
-                                    for chain in range(values.shape[0]):
-                                        log("Chain %d (uncorrected beta=%.4g, corrected beta=%.4g)" % (chain, uncorrected_betas_mean_m[chain,self.gene_set_to_ind[gene_set]], (cur_betas_mean_m[chain,ind] if use_mean_betas else cur_betas_sample_m[chain,ind])))
-                                        for i in indices[chain,::-1]:
-                                            if values[chain,i] == 0:
-                                                break
-                                            log("%s, V=%.4g, beta=%.4g, prod=%.4g" % (gene_sets_run[i], V_m[ind,i], (cur_betas_mean_m[chain,i] if use_mean_betas else cur_betas_sample_m[chain,i]), values[chain,i]))
-
-                    else:
-                        #store the values with zeros appended in order to add to sum_betas_m below
-                        full_betas_sample_m[begin:end,:][gene_set_mask_m[begin:end,:]] = cur_betas_sample_m.ravel()
-                        full_postp_sample_m[begin:end,:][gene_set_mask_m[begin:end,:]] = cur_postp_sample_m.ravel()
-                        full_betas_mean_m[begin:end,:][gene_set_mask_m[begin:end,:]] = cur_betas_mean_m.ravel()
-                        full_postp_mean_m[begin:end,:][gene_set_mask_m[begin:end,:]] = cur_postp_mean_m.ravel()
-
-                    #see how many are set to zero
-                    #set_to_zero_v += np.mean(np.logical_and(full_betas_sample_m == 0, uncorrected_betas_sample_m == 0).reshape(full_betas_sample_m.shape), axis=0)
-                    #avg_full_betas_sample_v += np.mean(full_betas_sample_m, axis=0)
-                    #avg_full_postp_sample_v += np.mean(full_postp_sample_m, axis=0)
-
-                #now restore the p and sigma
-                #self.set_sigma(orig_sigma2, self.sigma_power, sigma2_osc=self.sigma2_osc)
-                #self.set_p(orig_p)
-
-                if warm_start:
-                    #Warm-start next iteration using the current full corrected estimates.
-                    #Filtered out gene sets remain 0 because full_* matrices were initialized to zero.
-                    if use_mean_betas:
-                        prev_warm_start_betas_m = copy.copy(full_betas_mean_m)
-                        prev_warm_start_postp_m = copy.copy(full_postp_mean_m)
-                    else:
-                        prev_warm_start_betas_m = copy.copy(full_betas_sample_m)
-                        prev_warm_start_postp_m = copy.copy(full_postp_sample_m)
-
-                #since the betas are a sample (rather than mean), we can sample from priors by just multiplying this sample
-
-                #this is the (log) prior odds relative to the background_log_bf
-
-                def __calc_priors(_X, _betas, mean_shifts, scale_factors):
-                    return np.array(_X.dot((_betas / scale_factors).T) - np.sum(mean_shifts * _betas / scale_factors, axis=1).T).T
-
-
-                priors_sample_m = __calc_priors(self.X_orig, full_betas_sample_m, self.mean_shifts, self.scale_factors)
-                priors_mean_m = __calc_priors(self.X_orig, full_betas_mean_m, self.mean_shifts, self.scale_factors)
-                if self.genes_missing is not None:
-                    priors_missing_sample_m = __calc_priors(self.X_orig_missing_genes, full_betas_sample_m, self.mean_shifts, self.scale_factors)
-                    priors_missing_mean_m = __calc_priors(self.X_orig_missing_genes, full_betas_mean_m, self.mean_shifts, self.scale_factors)
-
-                def __adjust_max_prior_contribution(_X, _betas, _priors_m):
-                    priors_max_contribution_m = np.zeros(_priors_m.shape)
-                    #don't think it is possible to vectorize this due to sparse matrices maxxing out at two dimensions
-                    for chain in range(priors_max_contribution_m.shape[0]):
-                        priors_max_contribution_m[chain,:] = _X.multiply(np.abs(_betas[chain,:]) / self.scale_factors).max(axis=1).todense().A1
-                    priors_naive_m = np.array(_X.dot((np.abs(_betas) / self.scale_factors).T)).T
-
-                    priors_percentage_max_m = np.ones(_priors_m.shape)
-                    non_zero_priors_mask = priors_naive_m != 0
-                    priors_percentage_max_m[non_zero_priors_mask] = priors_max_contribution_m[non_zero_priors_mask] / priors_naive_m[non_zero_priors_mask]
-
-                    priors_percentage_max_m[priors_percentage_max_m < 0] = 0
-                    priors_percentage_max_m[priors_percentage_max_m > 1] = 1
-
-                    #for each prior, sample one percentage
-                    new_priors_percentage_max_m = copy.copy(priors_percentage_max_m)
-                    max_allowed_percentage = 0.95
-                    for chain in range(priors_max_contribution_m.shape[0]):
-                        sample_mask = priors_percentage_max_m[chain,:] < max_allowed_percentage
-                        num_allowed = np.sum(sample_mask)
-                        if num_allowed > 0:
-                            new_columns = np.random.randint(num_allowed, size=_priors_m.shape[1])
-                            new_priors_percentage_max_m[chain,:] = priors_percentage_max_m[chain,sample_mask][new_columns]
-
-                    #don't update those that were below the threshold or would increase
-                    no_update_priors_mask = np.logical_or(priors_percentage_max_m < new_priors_percentage_max_m, priors_percentage_max_m < max_allowed_percentage)
-                    new_priors_percentage_max_m[no_update_priors_mask] = priors_percentage_max_m[no_update_priors_mask]
-
-                    #return (np.zeros(_priors_m.shape), priors_percentage_max_m)
-
-                    priors_adjustment_m = -priors_max_contribution_m + new_priors_percentage_max_m * priors_naive_m
-                    return (priors_adjustment_m, priors_percentage_max_m)
-
-                #option not used right now
-                #if see one gene set dominating top, consider adding back
-                penalize_priors = False
-                if penalize_priors:
-                    self._record_param("penalize_priors", True)
-
-                    #first calculate
-                    priors_to_adjust_sample_m = priors_sample_m
-                    priors_to_adjust_mean_m = priors_mean_m
-                    if self.genes_missing is not None:
-                        priors_to_adjust_sample_m = np.hstack((priors_sample_m, priors_missing_sample_m))
-                        priors_to_adjust_mean_m = np.hstack((priors_mean_m, priors_missing_mean_m))
-
-                    (priors_adjustment_sample_m, priors_percentage_max_sample_m) = __adjust_max_prior_contribution(X_all, full_betas_sample_m, priors_to_adjust_sample_m)
-                    (priors_adjustment_mean_m, priors_percentage_max_mean_m) = __adjust_max_prior_contribution(X_all, full_betas_mean_m, priors_to_adjust_mean_m)
-
-                    if self.genes_missing is not None:
-                        priors_missing_sample_m += priors_adjustment_sample_m[:,-priors_missing_sample_m.shape[1]:]
-                        priors_missing_mean_m += priors_adjustment_mean_m[:,-priors_missing_mean_m.shape[1]:]
-                        priors_sample_m += priors_adjustment_sample_m[:,:priors_adjustment_sample_m.shape[1]-priors_missing_sample_m.shape[1]]
-                        priors_mean_m += priors_adjustment_mean_m[:,:priors_adjustment_mean_m.shape[1]-priors_missing_mean_m.shape[1]]
-                    else:
-                        priors_sample_m += priors_adjustment_sample_m
-                        priors_mean_m += priors_adjustment_mean_m
-
-                if self.huge_signal_bfs is not None and update_huge_scores:
-                    #Now update the BFs is we have huge scores
-                    log("Updating HuGE scores")
-                    if self.huge_signal_bfs is not None:
-                        rel_prior_log_bf = priors_for_Y_m
-
-                        (log_bf_m, log_bf_uncorrected_m, absent_genes, absent_log_bf) = self._distill_huge_signal_bfs(self.huge_signal_bfs_for_regression, self.huge_signal_posteriors_for_regression, self.huge_signal_sum_gene_cond_probabilities_for_regression, self.huge_signal_mean_gene_pos_for_regression, self.huge_signal_max_closest_gene_prob, self.huge_cap_region_posterior, self.huge_scale_region_posterior, self.huge_phantom_region_posterior, self.huge_allow_evidence_of_absence, self.gene_covariates, self.gene_covariates_mask, self.gene_covariates_mat_inv, self.gene_covariate_names, self.gene_covariate_intercept_index, self.genes, rel_prior_log_bf=rel_prior_log_bf + (self.Y_exomes if self.Y_exomes is not None else 0) + (self.Y_positive_controls if self.Y_positive_controls is not None else 0) + (self.Y_case_counts if self.Y_case_counts is not None else 0))
-
-                        if compute_Y_raw:
-                            (log_bf_raw_m, log_bf_uncorrected_raw_m, absent_genes_raw, absent_log_bf_raw) = self._distill_huge_signal_bfs(self.huge_signal_bfs, self.huge_signal_posteriors, self.huge_signal_sum_gene_cond_probabilities, self.huge_signal_mean_gene_pos, self.huge_signal_max_closest_gene_prob, self.huge_cap_region_posterior, self.huge_scale_region_posterior, self.huge_phantom_region_posterior, self.huge_allow_evidence_of_absence, self.gene_covariates, self.gene_covariates_mask, self.gene_covariates_mat_inv, self.gene_covariate_names, self.gene_covariate_intercept_index, self.genes, rel_prior_log_bf=rel_prior_log_bf + (self.Y_exomes if self.Y_exomes is not None else 0) + (self.Y_positive_controls if self.Y_positive_controls is not None else 0) + (self.Y_case_counts if self.Y_case_counts is not None else 0))
-                        else:
-                            log_bf_raw_m = copy.copy(log_bf_m)
-
-                        if self.Y_exomes is not None:
-                            #add in the Y_exomes
-                            #it was used in distill just to fine map the GWAS associations; it was then subtracted out
-                            #the other component of the rel_prior_log_bf (priors) will be added back in next iteration
-                            log_bf_m += self.Y_exomes
-                            log_bf_uncorrected_m += self.Y_exomes
-                            log_bf_raw_m += self.Y_exomes
-
-                        if self.Y_positive_controls is not None:
-                            #add in the Y_positive_controls
-                            #it was used in distill just to fine map the GWAS associations; it was then subtracted out
-                            #the other component of the rel_prior_log_bf (priors) will be added back in next iteration
-                            log_bf_m += self.Y_positive_controls
-                            log_bf_uncorrected_m += self.Y_positive_controls
-                            log_bf_raw_m += self.Y_positive_controls
-
-                        if self.Y_case_counts is not None:
-                            #add in the Y_case_counts
-                            #it was used in distill just to fine map the GWAS associations; it was then subtracted out
-                            #the other component of the rel_prior_log_bf (priors) will be added back in next iteration
-                            log_bf_m += self.Y_case_counts
-                            log_bf_uncorrected_m += self.Y_case_counts
-                            log_bf_raw_m += self.Y_case_counts
-
-                        if len(absent_genes) > 0:
-                            bail("Error: huge_signal_bfs was incorrectly set and contains extra genes")
-
-                #if center_combined:
-                #    priors_sample_total_m = np.hstack((priors_sample_m, priors_missing_sample_m))
-                #    total_mean_v = np.mean(priors_sample_total_m, axis=1)
-                #    priors_sample_m = (priors_sample_m.T - total_mean_v).T
-                #    priors_missing_sample_m = (priors_missing_sample_m.T - total_mean_v).T
-                #    priors_mean_m = (priors_mean_m.T - total_mean_v).T
-                #    priors_missing_mean_m = (priors_missing_mean_m.T - total_mean_v).T
-
-
-                #    priors_sample_m = (priors_sample_m.T + np.mean(full_alpha_tildes_m, axis=1) - self.background_log_bf).T
-                #    priors_missing_sample_m = (priors_missing_sample_m.T + np.mean(full_alpha_tildes_m, axis=1) - self.background_log_bf).T
-
-                #do the regression
-                total_priors_m = np.hstack((priors_sample_m, priors_missing_sample_m))
-                gene_N = self.get_gene_N()
-                gene_N_missing = self.get_gene_N(get_missing=True)
-
-                all_gene_N = gene_N
-                if self.genes_missing is not None:
-                    assert(gene_N_missing is not None)
-                    all_gene_N = np.concatenate((all_gene_N, gene_N_missing))
-
-                priors_slope = total_priors_m.dot(all_gene_N) / (total_priors_m.shape[1] * np.var(all_gene_N))
-                #no intercept since we just standardized above
-
-                if adjust_priors:
-                    log("Adjusting priors with slopes ranging from %.4g-%.4g" % (np.min(priors_slope), np.max(priors_slope)), TRACE)
-                    priors_sample_m = priors_sample_m - np.outer(priors_slope, gene_N)
-                    priors_mean_m = priors_mean_m - np.outer(priors_slope, gene_N)
-
-                    if self.genes_missing is not None:
-                        priors_missing_sample_m = priors_missing_sample_m - np.outer(priors_slope, gene_N_missing)
-                        priors_missing_mean_m = priors_missing_mean_m - np.outer(priors_slope, gene_N_missing)
-
-                priors_for_Y_m = priors_sample_m
-                priors_percentage_max_for_Y_m = priors_percentage_max_sample_m
-                priors_adjustment_for_Y_m = priors_adjustment_sample_m
-                if use_mean_betas:
-                    priors_for_Y_m = priors_mean_m                
-                    priors_percentage_max_for_Y_m = priors_percentage_max_mean_m
-                    priors_adjustment_for_Y_m = priors_adjustment_mean_m
-
-                #only add non-outliers to mean/sd
-                #non_outlier_mask = np.full(sum_z_scores2_m.shape, True)
-                #non_outlier_mask[num_sum_outlier_m > 10] = np.abs(full_z_scores_m[num_sum_outlier_m > 10]) < -scipy.stats.norm.ppf(0.5 * 0.05 / (num_sum_outlier_m[num_sum_outlier_m > 10] * num_chains_betas))
-                #if pre_gene_set_filter_mask is not None:
-                #    non_outlier_mask[:,~pre_gene_set_filter_mask] = False
-                #sum_z_scores2_m[non_outlier_mask] = np.add(sum_z_scores2_m[non_outlier_mask], np.power(full_z_scores_m[non_outlier_mask], 2))
-                #sum_z_scores_m[non_outlier_mask] = np.add(sum_z_scores_m[non_outlier_mask], full_z_scores_m[non_outlier_mask])
-                #num_sum_outlier_m[non_outlier_mask] += 1
-
-                all_sum_betas_m = np.add(all_sum_betas_m, full_betas_mean_m)
-                all_sum_betas2_m = np.add(all_sum_betas2_m, np.power(full_betas_mean_m, 2))
-                all_sum_z_scores_m = np.add(all_sum_z_scores_m, full_z_scores_m)
-                all_sum_z_scores2_m = np.add(all_sum_z_scores2_m, np.power(full_z_scores_m, 2))
-                all_num_sum_m += 1
-
-                all_sum_Ys_m = np.add(all_sum_Ys_m, Y_sample_m)
-                all_sum_Ys2_m = np.add(all_sum_Ys2_m, np.power(Y_sample_m, 2))
-
-                R_Y_v = np.zeros(all_sum_Ys_m.shape[1])
-                R_beta_v = np.zeros(all_sum_betas_m.shape[1])
-
-                if increase_hyper_if_betas_below_for_epoch is not None:
-                    #check to make sure that we satisfy
-                    if np.any(all_num_sum_m == 0):
-                        gibbs_good = False
-                    else:
-
-                        #check both sum of all iterations (to not wait until convergence to detect failures)
-                        #and sum of iterations after convergence
-                        _, all_cur_avg_betas_v = __outlier_resistant_mean(all_sum_betas_m, all_num_sum_m)
-
-                        fraction_required = 0.001
-                        self._record_param("fraction_required_to_not_increase_hyper", fraction_required)
-
-                        #all_low = np.all(all_cur_avg_betas_v / self.scale_factors < increase_hyper_if_betas_below)
-                        #all_low = np.mean(all_cur_avg_betas_v / self.scale_factors > increase_hyper_if_betas_below) < fraction_required
-                        all_low = False
-
-                        if np.all(num_sum_beta_m > 0):
-                            _, cur_avg_betas_v = __outlier_resistant_mean(sum_betas_m, num_sum_beta_m)
-                            #all_low = all_low or np.all(cur_avg_betas_v / self.scale_factors < increase_hyper_if_betas_below)
-                            #all_low = np.all(cur_avg_betas_v / self.scale_factors < increase_hyper_if_betas_below)
-                            all_low = np.mean(cur_avg_betas_v / self.scale_factors > increase_hyper_if_betas_below_for_epoch) < fraction_required
-                            
-                        #if np.all(all_num_sum_m > 0):
-                        #    top_gene_set = np.argmax(np.mean(all_sum_betas_m / all_num_sum_m, axis=0) / self.scale_factors)
-                        #    log("Top gene set %s has all value %.3g" % (self.gene_sets[top_gene_set], (np.mean(all_sum_betas_m / all_num_sum_m, axis=0) / self.scale_factors)[top_gene_set]), TRACE)
-                        #    top_gene_set2 = np.argmax(all_cur_avg_betas_v / self.scale_factors)
-                        #    log("Top gene set %s has all outlier value %.3g" % (self.gene_sets[top_gene_set], (all_cur_avg_betas_v / self.scale_factors)[top_gene_set]), TRACE)
-
-                        if np.all(num_sum_beta_m > 0):
-                            top_gene_set = np.argmax(np.mean(sum_betas_m / num_sum_beta_m, axis=0) / self.scale_factors)
-                            log("Top gene set %s has value %.3g" % (self.gene_sets[top_gene_set], (np.mean(sum_betas_m / num_sum_beta_m, axis=0) / self.scale_factors)[top_gene_set]), TRACE)
-                            top_gene_set2 = np.argmax(cur_avg_betas_v / self.scale_factors)
-                            log("Top gene set %s has outlier value %.3g" % (self.gene_sets[top_gene_set2], (cur_avg_betas_v / self.scale_factors)[top_gene_set]), TRACE)
-
-                            #top_gene_sets = np.argsort(np.mean(sum_betas_m / num_sum_beta_m, axis=0) / self.scale_factors)[::-1][:10]
-                            #for i in top_gene_sets:
-                            #    log("Top %d gene set %s has value %.3g" % (i, self.gene_sets[i], (np.mean(sum_betas_m / num_sum_beta_m, axis=0) / self.scale_factors)[i]), TRACE)
-
-                            #top_gene_sets = np.argsort(cur_avg_betas_v / self.scale_factors)[::-1][:10]
-                            #for i in top_gene_sets:
-                            #    log("Top %d gene set %s has outlier value %.3g" % (i, self.gene_sets[i], (cur_avg_betas_v[i] / self.scale_factors)[i]), TRACE)
-
-
-                        if all_low:
-
-                            log("Only %.3g of %d (%.3g) are above %.3g" % (np.sum(cur_avg_betas_v / self.scale_factors > increase_hyper_if_betas_below_for_epoch), len(cur_avg_betas_v), np.mean(cur_avg_betas_v / self.scale_factors > increase_hyper_if_betas_below_for_epoch), increase_hyper_if_betas_below_for_epoch))
-
-                            #at minimum, guarantee that it will restart unless it gets above this
-                            gibbs_good = False
-                            #only if above num for checking though that we increase and restart
-                            if iteration_num > num_before_checking_p_increase:
-                                new_p = self.p
-                                new_sigma2 = self.sigma2
-
-                                self._record_param("p_scale_factor", p_scale_factor)
-
-                                new_p = self.p * p_scale_factor
-                                num_p_increases += 1
-                                if new_p > 1:
-                                    new_p = 1
-
-                              
-                                break_loop = False
-                                if new_p != self.p and num_attempts < max_num_attempt_restarts:
-                                    #update so that new_sigma2 / new_p = self.sigma2 / self.p
-                                    new_sigma2 = self.sigma2 * new_p / self.p
-
-                                    self.ps *= new_p / self.p
-                                    self.set_p(new_p)
-                                    self._record_param("p_adj", new_p)
-                                    log("Detected all gene set betas below %.3g; increasing p to %.3g and restarting gibbs" % (increase_hyper_if_betas_below_for_epoch, self.p))
-
-                                    #restart
-                                    break_loop = True
-                                if new_sigma2 != self.sigma2 and num_attempts < max_num_attempt_restarts:
-                                    self.sigma2s *= new_sigma2 / self.sigma2
-                                    self._record_param("sigma2_adj", new_sigma2)
-                                    self.set_sigma(new_sigma2, self.sigma_power)
-                                    log("Detected all gene set betas below %.3g; increasing sigma to %.3g and restarting gibbs" % (increase_hyper_if_betas_below_for_epoch, self.sigma2))
-                                    break_loop = True
-                                if break_loop:
-                                    break
-                        else:
-                            gibbs_good = True
-
-                if in_burn_in:
-                    num_samples = iteration_num + 1
-                    if num_samples >= max_num_burn_in_for_epoch:
-                        in_burn_in = False
-                        burn_in_pass_streak = 0
-                        stop_pass_streak = 0
-                        __reset_post_burn_in_sums()
-                        log("Stopping Gibbs burn in after %d iterations (per-epoch max burn-in reached)" % (num_samples), INFO)
-                    elif gauss_seidel:
-                        if prev_Ys_m is not None:
-                            sum_diff = np.sum(np.abs(prev_Ys_m - Y_sample_m))
-                            sum_prev = np.sum(np.abs(prev_Ys_m))
-                            max_diff_frac = np.max(np.abs((prev_Ys_m - Y_sample_m)/prev_Ys_m))
-
-                            tot_diff = sum_diff / sum_prev
-                            log("Gibbs iteration %d (global %d): mean gauss seidel difference = %.4g / %.4g = %.4g; max frac difference = %.4g" % (num_samples, epoch_total_iter_offset + num_samples, sum_diff, sum_prev, tot_diff, max_diff_frac))
-                            if num_samples > min_num_iter_for_epoch and tot_diff < eps:
-                                in_burn_in = False
-                                burn_in_pass_streak = 0
-                                stop_pass_streak = 0
-                                __reset_post_burn_in_sums()
-                                log("Gibbs gauss converged after %d iterations" % num_samples, INFO)
-                        prev_Ys_m = Y_sample_m
-                    elif num_samples >= min_num_burn_in_for_epoch and (num_samples % diag_every == 0 or num_samples == epoch_max_num_iter):
-                        (_, _, R_beta_v, _) = __calculate_R(all_sum_betas_m, all_sum_betas2_m, num_samples)
-                        active_beta_mask_v, _, _ = __get_active_beta_mask(all_sum_betas_m, all_num_sum_m)
-                        num_active_betas = int(np.sum(active_beta_mask_v))
-                        if num_active_betas > 0:
-                            R_beta_active_v = R_beta_v[active_beta_mask_v]
-                            rhat_candidates = R_beta_active_v[np.logical_and(np.isfinite(R_beta_active_v), R_beta_active_v >= 1)]
-                            beta_rhat_q = __safe_quantile(rhat_candidates, burn_in_rhat_quantile, 1.0)
-                            beta_rhat_max = __safe_quantile(R_beta_active_v, 1.0, 1.0)
-                        else:
-                            beta_rhat_q = 1.0
-                            beta_rhat_max = 1.0
-                        burn_in_pass = beta_rhat_q <= r_threshold_burn_in
-                        if burn_in_pass:
-                            burn_in_pass_streak += 1
-                        else:
-                            burn_in_pass_streak = 0
-                        burn_in_rhat_history.append(beta_rhat_q)
-                        burn_best_beta_rhat_q = beta_rhat_q if len(burn_stall_best_beta_rhat_history) == 0 else min(burn_stall_best_beta_rhat_history[-1], beta_rhat_q)
-                        burn_stall_best_beta_rhat_history.append(burn_best_beta_rhat_q)
-
-                        if burn_stall_beta_indices is None:
-                            burn_stall_beta_indices = __prepare_stall_indices(active_beta_mask_v, np.mean(__means_from_sums(all_sum_betas_m, all_num_sum_m), axis=0), active_beta_top_k)
-                        if burn_stall_beta_indices.size > 0:
-                            burn_stall_sum_m = copy.copy(all_sum_betas_m[:,burn_stall_beta_indices])
-                            burn_stall_sum2_m = copy.copy(all_sum_betas2_m[:,burn_stall_beta_indices])
-                        else:
-                            burn_stall_sum_m = np.zeros((num_chains, 0))
-                            burn_stall_sum2_m = np.zeros((num_chains, 0))
-                        burn_stall_snapshots.append((num_samples, burn_stall_sum_m, burn_stall_sum2_m, beta_rhat_q))
-
-                        max_stall_history_len = max(stall_window + 2, stall_recent_window + 2, 10)
-                        if len(burn_stall_best_beta_rhat_history) > max_stall_history_len:
-                            burn_stall_best_beta_rhat_history = burn_stall_best_beta_rhat_history[-max_stall_history_len:]
-                        if len(burn_stall_snapshots) > max_stall_history_len:
-                            burn_stall_snapshots = burn_stall_snapshots[-max_stall_history_len:]
-
-                        burn_stall_plateau = False
-                        burn_stall_recent_worse = False
-                        burn_stall_recent_beta_rhat_q = np.nan
-                        min_samples_for_burn_stall = max(min_num_burn_in_for_epoch, stall_min_burn_in)
-                        if stall_window > 0 and num_samples >= min_samples_for_burn_stall:
-                            if len(burn_stall_best_beta_rhat_history) >= stall_window:
-                                burn_rhat_improvement = burn_stall_best_beta_rhat_history[-stall_window] - burn_stall_best_beta_rhat_history[-1]
-                                if burn_rhat_improvement < stall_delta_rhat:
-                                    burn_stall_plateau = True
-
-                            if stall_recent_window > 0 and len(burn_stall_snapshots) >= stall_recent_window + 1 and burn_stall_beta_indices.size > 0:
-                                old_num_samples, old_sum_m, old_sum2_m, _ = burn_stall_snapshots[-(stall_recent_window + 1)]
-                                recent_num_samples = num_samples - old_num_samples
-                                if recent_num_samples > 1:
-                                    recent_sum_m = burn_stall_sum_m - old_sum_m
-                                    recent_sum2_m = burn_stall_sum2_m - old_sum2_m
-                                    _, _, burn_recent_R_beta_v, _ = __calculate_R(recent_sum_m, recent_sum2_m, recent_num_samples)
-                                    burn_recent_candidates = burn_recent_R_beta_v[np.logical_and(np.isfinite(burn_recent_R_beta_v), burn_recent_R_beta_v >= 1)]
-                                    burn_stall_recent_beta_rhat_q = __safe_quantile(burn_recent_candidates, burn_in_rhat_quantile, 1.0)
-                                    if burn_stall_recent_beta_rhat_q > beta_rhat_q * (1 + stall_recent_eps):
-                                        burn_stall_recent_worse = True
-
-                        burn_stall_detected = burn_stall_plateau or burn_stall_recent_worse
-                        log("Gibbs burn-in iter %d: beta_Rhat_q(%.2f)=%.4g; beta_Rhat_max=%.4g; active_betas=%d/%d; burn_streak=%d/%d; stop_streak=%d/%d" % (num_samples, burn_in_rhat_quantile, beta_rhat_q, beta_rhat_max, num_active_betas, num_full_gene_sets, burn_in_pass_streak, burn_in_patience, stop_pass_streak, stop_patience), INFO)
-                        if burn_in_pass_streak >= burn_in_patience:
-                            in_burn_in = False
-                            stop_pass_streak = 0
-                            __reset_post_burn_in_sums()
-                            log("Burn-in complete at iter %d (beta R-hat q=%.2f on active betas, threshold=%.4g, patience=%d)" % (num_samples, burn_in_rhat_quantile, r_threshold_burn_in, burn_in_patience), INFO)
-                        elif burn_stall_detected:
-                            in_burn_in = False
-                            burn_in_pass_streak = 0
-                            stop_pass_streak = 0
-                            __reset_post_burn_in_sums()
-                            log("Stopping Gibbs burn in at iter %d due to stall detectors (plateau=%s, recent_worse=%s)" % (num_samples, str(burn_stall_plateau), str(burn_stall_recent_worse)), INFO)
-                        elif burn_in_stall_window > 0 and len(burn_in_rhat_history) >= burn_in_stall_window:
-                            burn_window_v = np.array(burn_in_rhat_history[-burn_in_stall_window:], dtype=float)
-                            if np.all(np.isfinite(burn_window_v)):
-                                burn_window_span = np.max(burn_window_v) - np.min(burn_window_v)
-                                if burn_window_span < burn_in_stall_delta:
-                                    in_burn_in = False
-                                    burn_in_pass_streak = 0
-                                    stop_pass_streak = 0
-                                    __reset_post_burn_in_sums()
-                                    log("Stopping Gibbs burn in at iter %d due to R-hat plateau (window=%d, span=%.4g < delta=%.4g)" % (num_samples, burn_in_stall_window, burn_window_span, burn_in_stall_delta), INFO)
-
-                done = False
-
-                if not in_burn_in:
-
-                    #sum_Ys_post_m = np.add(sum_Ys_post_m, Y_sample_m)
-                    #sum_Ys2_post_m += np.add(sum_Ys2_post_m, np.square(Y_sample_m))
-                    #num_sum_post += 1
-
-                    sum_Ys_m += Y_sample_m
-                    sum_Ys2_m += np.power(Y_sample_m, 2)
-                    sum_Y_raws_m += Y_raw_sample_m
-                    sum_log_pos_m += log_po_sample_m
-                    sum_log_pos2_m += np.power(log_po_sample_m, 2)
-                    sum_log_po_raws_m += log_po_raw_sample_m
-                    sum_log_po_raws2_m += np.power(log_po_raw_sample_m, 2)
-                    sum_priors_m += priors_for_Y_m
-                    sum_priors2_m += np.power(priors_for_Y_m, 2)
-                    sum_Ds_m += D_sample_m
-                    sum_D_raws_m += D_raw_sample_m
-                    sum_bf_orig_m += log_bf_m
-                    sum_bf_uncorrected_m += log_bf_uncorrected_m
-                    sum_bf_orig_raw_m += log_bf_raw_m
-                    sum_bf_orig_raw2_m += np.power(log_bf_raw_m, 2)
-                    num_sum_Y_m += 1
-
-                    #temp_genes = ["FTO", "IRS1", "ANKH", "INSR"]
-                    #temp_genes = [x for x in temp_genes if x in self.gene_to_ind]
-
-                    sum_betas_m += full_betas_mean_m
-                    sum_betas2_m += np.power(full_betas_mean_m, 2)
-                    sum_betas_uncorrected_m += uncorrected_betas_mean_m
-                    sum_betas_uncorrected2_m += np.power(uncorrected_betas_mean_m, 2)
-                    sum_postp_m += full_postp_sample_m
-                    sum_beta_tildes_m += full_beta_tildes_m
-                    sum_z_scores_m += full_z_scores_m
-                    num_sum_beta_m += 1
-
-                    if self.genes_missing is not None:
-                        sum_priors_missing_m += priors_missing_mean_m
-
-                        max_log = 15
-                        cur_log_priors_missing_m = priors_missing_mean_m + self.background_log_bf
-                        cur_log_priors_missing_m[cur_log_priors_missing_m > max_log] = max_log
-
-                        sum_Ds_missing_m += np.exp(cur_log_priors_missing_m) / (1 + np.exp(cur_log_priors_missing_m))
-
-                        num_sum_priors_missing_m += 1
-
-                    #record these for tracing
-
-                    if np.all(num_sum_Y_m > 1) and np.all(num_sum_beta_m > 1) and ((iteration_num + 1) % diag_every == 0 or iteration_num + 1 == epoch_max_num_iter):
-                        # For stopping diagnostics, aggregate previous completed epochs with the
-                        # current in-progress epoch so MCSE aligns with final reported MCSE.
-                        if len(aggregated_sum_betas_m) > 0:
-                            diag_sum_betas_m = np.vstack(aggregated_sum_betas_m + [sum_betas_m])
-                            diag_sum_betas2_m = np.vstack(aggregated_sum_betas2_m + [sum_betas2_m])
-                            diag_num_sum_beta_m = np.vstack(aggregated_num_sum_beta_m + [num_sum_beta_m])
-                            diag_sum_Ds_m = np.vstack(aggregated_sum_Ds_m + [sum_Ds_m])
-                            diag_num_sum_Y_m = np.vstack(aggregated_num_sum_Y_m + [num_sum_Y_m])
-                        else:
-                            diag_sum_betas_m = sum_betas_m
-                            diag_sum_betas2_m = sum_betas2_m
-                            diag_num_sum_beta_m = num_sum_beta_m
-                            diag_sum_Ds_m = sum_Ds_m
-                            diag_num_sum_Y_m = num_sum_Y_m
-
-                        num_chains_effective_for_diag = diag_sum_betas_m.shape[0]
-
-                        active_beta_mask, beta_chain_means_m, beta_mean_v = __get_active_beta_mask(diag_sum_betas_m, diag_num_sum_beta_m)
-                        num_active_betas = int(np.sum(active_beta_mask))
-                        beta_mcse_v = np.sqrt(np.var(beta_chain_means_m, axis=0, ddof=1) / float(num_chains_effective_for_diag))
-                        betas_sem2_v = np.square(beta_mcse_v)
-
-                        num_post_burn_beta = int(np.min(diag_num_sum_beta_m))
-                        _, _, post_R_beta_v, _ = __calculate_R(diag_sum_betas_m, diag_sum_betas2_m, num_post_burn_beta)
-                        if np.any(active_beta_mask):
-                            post_R_beta_active_v = post_R_beta_v[active_beta_mask]
-                            post_rhat_candidates = post_R_beta_active_v[np.logical_and(np.isfinite(post_R_beta_active_v), post_R_beta_active_v >= 1)]
-                            beta_rhat_q_post = __safe_quantile(post_rhat_candidates, stop_mcse_quantile, 1.0)
-                        else:
-                            beta_rhat_q_post = 1.0
-
-                        if np.any(active_beta_mask):
-                            beta_ratio_v = beta_mcse_v / np.maximum(np.abs(beta_mean_v), beta_rel_mcse_denom_floor)
-                            beta_ratio_q = __safe_quantile(beta_ratio_v[active_beta_mask], stop_mcse_quantile, np.inf)
-                        else:
-                            beta_ratio_q = 0.0
-
-                        D_chain_means_m = __means_from_sums(diag_sum_Ds_m, diag_num_sum_Y_m)
-                        D_mean_v = np.mean(D_chain_means_m, axis=0)
-                        D_mcse_v = np.sqrt(np.var(D_chain_means_m, axis=0, ddof=1) / float(num_chains_effective_for_diag))
-                        sem2_v = np.square(D_mcse_v)
-
-                        top_gene_k = min(stop_top_gene_k, len(D_mean_v))
-                        num_eligible_genes = len(D_mean_v)
-                        if stop_min_gene_d is not None:
-                            eligible_gene_indices = np.where(D_mean_v >= stop_min_gene_d)[0]
-                            num_eligible_genes = len(eligible_gene_indices)
-                            if num_eligible_genes > 0:
-                                if top_gene_k >= num_eligible_genes:
-                                    top_gene_indices = eligible_gene_indices
-                                else:
-                                    top_gene_indices = eligible_gene_indices[np.argpartition(-D_mean_v[eligible_gene_indices], top_gene_k - 1)[:top_gene_k]]
-                            else:
-                                if top_gene_k >= len(D_mean_v):
-                                    top_gene_indices = np.arange(len(D_mean_v))
-                                else:
-                                    top_gene_indices = np.argpartition(-D_mean_v, top_gene_k - 1)[:top_gene_k]
-                        else:
-                            if top_gene_k >= len(D_mean_v):
-                                top_gene_indices = np.arange(len(D_mean_v))
-                            else:
-                                top_gene_indices = np.argpartition(-D_mean_v, top_gene_k - 1)[:top_gene_k]
-                        num_monitored_genes = len(top_gene_indices)
-                        D_mcse_q = __safe_quantile(D_mcse_v[top_gene_indices], stop_mcse_quantile, np.inf)
-
-                        post_best_beta_rhat_q = beta_rhat_q_post if len(post_stall_best_beta_rhat_history) == 0 else min(post_stall_best_beta_rhat_history[-1], beta_rhat_q_post)
-                        post_best_D_mcse_q = D_mcse_q if len(post_stall_best_D_mcse_history) == 0 else min(post_stall_best_D_mcse_history[-1], D_mcse_q)
-                        post_stall_best_beta_rhat_history.append(post_best_beta_rhat_q)
-                        post_stall_best_D_mcse_history.append(post_best_D_mcse_q)
-
-                        if post_stall_beta_indices is None:
-                            post_stall_beta_indices = __prepare_stall_indices(active_beta_mask, beta_mean_v, active_beta_top_k)
-                        if post_stall_gene_indices is None:
-                            post_stall_gene_indices = copy.copy(top_gene_indices)
-
-                        if post_stall_beta_indices.size > 0:
-                            post_stall_beta_sum_m = copy.copy(sum_betas_m[:,post_stall_beta_indices])
-                            post_stall_beta_sum2_m = copy.copy(sum_betas2_m[:,post_stall_beta_indices])
-                        else:
-                            post_stall_beta_sum_m = np.zeros((num_chains, 0))
-                            post_stall_beta_sum2_m = np.zeros((num_chains, 0))
-                        if post_stall_gene_indices.size > 0:
-                            post_stall_D_sum_m = copy.copy(sum_Ds_m[:,post_stall_gene_indices])
-                        else:
-                            post_stall_D_sum_m = np.zeros((num_chains, 0))
-                        num_post_burn_D = int(np.min(num_sum_Y_m))
-                        post_stall_snapshots.append((num_post_burn_beta, post_stall_beta_sum_m, post_stall_beta_sum2_m, num_post_burn_D, post_stall_D_sum_m))
-
-                        max_stall_history_len = max(stall_window + 2, stall_recent_window + 2, 10)
-                        if len(post_stall_best_beta_rhat_history) > max_stall_history_len:
-                            post_stall_best_beta_rhat_history = post_stall_best_beta_rhat_history[-max_stall_history_len:]
-                            post_stall_best_D_mcse_history = post_stall_best_D_mcse_history[-max_stall_history_len:]
-                        if len(post_stall_snapshots) > max_stall_history_len:
-                            post_stall_snapshots = post_stall_snapshots[-max_stall_history_len:]
-
-                        post_stall_plateau = False
-                        post_stall_recent_worse = False
-                        post_stall_recent_beta_rhat_q = np.nan
-                        post_stall_recent_D_mcse_q = np.nan
-                        min_post_burn_for_stall = max(stall_min_post_burn_in, min_num_post_burn_in_for_epoch)
-                        if stall_window > 0 and num_post_burn_D >= min_post_burn_for_stall:
-                            if len(post_stall_best_beta_rhat_history) >= stall_window:
-                                post_rhat_improvement = post_stall_best_beta_rhat_history[-stall_window] - post_stall_best_beta_rhat_history[-1]
-                                post_mcse_improvement = post_stall_best_D_mcse_history[-stall_window] - post_stall_best_D_mcse_history[-1]
-                                if post_rhat_improvement < stall_delta_rhat and post_mcse_improvement < stall_delta_mcse:
-                                    post_stall_plateau = True
-
-                            if stall_recent_window > 0 and len(post_stall_snapshots) >= stall_recent_window + 1:
-                                old_beta_n, old_beta_sum_m, old_beta_sum2_m, old_D_n, old_D_sum_m = post_stall_snapshots[-(stall_recent_window + 1)]
-                                recent_beta_n = num_post_burn_beta - old_beta_n
-                                recent_D_n = num_post_burn_D - old_D_n
-
-                                if recent_beta_n > 1 and post_stall_beta_indices.size > 0:
-                                    recent_beta_sum_m = post_stall_beta_sum_m - old_beta_sum_m
-                                    recent_beta_sum2_m = post_stall_beta_sum2_m - old_beta_sum2_m
-                                    _, _, recent_R_beta_v, _ = __calculate_R(recent_beta_sum_m, recent_beta_sum2_m, recent_beta_n)
-                                    recent_rhat_candidates = recent_R_beta_v[np.logical_and(np.isfinite(recent_R_beta_v), recent_R_beta_v >= 1)]
-                                    post_stall_recent_beta_rhat_q = __safe_quantile(recent_rhat_candidates, stop_mcse_quantile, 1.0)
-
-                                if recent_D_n > 1 and post_stall_gene_indices.size > 0:
-                                    recent_D_sum_m = post_stall_D_sum_m - old_D_sum_m
-                                    recent_D_chain_means_m = recent_D_sum_m / float(recent_D_n)
-                                    recent_D_mcse_v = np.sqrt(np.var(recent_D_chain_means_m, axis=0, ddof=1) / float(num_chains))
-                                    post_stall_recent_D_mcse_q = __safe_quantile(recent_D_mcse_v, stop_mcse_quantile, np.inf)
-
-                                if np.isfinite(post_stall_recent_beta_rhat_q) and post_stall_recent_beta_rhat_q > beta_rhat_q_post * (1 + stall_recent_eps):
-                                    post_stall_recent_worse = True
-                                if np.isfinite(post_stall_recent_D_mcse_q) and post_stall_recent_D_mcse_q > D_mcse_q * (1 + stall_recent_eps):
-                                    post_stall_recent_worse = True
-
-                        post_stall_detected = post_stall_plateau or post_stall_recent_worse
-
-                        min_post_burn_reached = num_post_burn_D >= min_num_post_burn_in_for_epoch
-                        precision_pass = beta_ratio_q <= max_rel_mcse_beta and D_mcse_q <= max_abs_mcse_d
-                        if precision_pass and min_post_burn_reached:
-                            stop_pass_streak += 1
-                        else:
-                            stop_pass_streak = 0
-
-                        if stop_min_gene_d is None:
-                            log("Gibbs iteration %d (global %d): beta_Rhat_q(%.2f)=%.4g; beta_rel_mcse_q(%.2f)=%.4g (threshold=%.4g, denom_floor=%.4g); D_mcse_q(%.2f, topK=%d)=%.4g (threshold=%.4g); active_betas=%d/%d; eff_chains=%d; burn_streak=%d/%d; stop_streak=%d/%d" % (epoch_iter_num, total_iter_num, stop_mcse_quantile, beta_rhat_q_post, stop_mcse_quantile, beta_ratio_q, max_rel_mcse_beta, beta_rel_mcse_denom_floor, stop_mcse_quantile, top_gene_k, D_mcse_q, max_abs_mcse_d, num_active_betas, num_full_gene_sets, num_chains_effective_for_diag, burn_in_pass_streak, burn_in_patience, stop_pass_streak, stop_patience), INFO)
-                        else:
-                            log("Gibbs iteration %d (global %d): beta_Rhat_q(%.2f)=%.4g; beta_rel_mcse_q(%.2f)=%.4g (threshold=%.4g, denom_floor=%.4g); D_mcse_q(%.2f, topK=%d, minD=%.4g, monitored=%d, eligible=%d)=%.4g (threshold=%.4g); active_betas=%d/%d; eff_chains=%d; burn_streak=%d/%d; stop_streak=%d/%d" % (epoch_iter_num, total_iter_num, stop_mcse_quantile, beta_rhat_q_post, stop_mcse_quantile, beta_ratio_q, max_rel_mcse_beta, beta_rel_mcse_denom_floor, stop_mcse_quantile, top_gene_k, stop_min_gene_d, num_monitored_genes, num_eligible_genes, D_mcse_q, max_abs_mcse_d, num_active_betas, num_full_gene_sets, num_chains_effective_for_diag, burn_in_pass_streak, burn_in_patience, stop_pass_streak, stop_patience), INFO)
-
-                        precision_achieved = (min_post_burn_reached and stop_pass_streak >= stop_patience)
-
-                        if precision_achieved:
-                            stop_due_to_precision = True
-                            log("Desired Gibbs precision achieved; stopping sampling", INFO)
-                            done = True
-                        elif post_stall_detected:
-                            if num_attempts < max_num_attempt_restarts:
-                                restart_due_to_stall = True
-                                done = True
-                                # Keep and aggregate this epoch's post-burn samples, then continue
-                                # with a new epoch to add more effective chain means.
-                                log("Restarting Gibbs epoch due to post-burn stall at iter %d (global %d) because precision is not yet met (plateau=%s, recent_worse=%s, beta_Rhat_q=%.4g, D_mcse_q=%.4g, recent_beta_Rhat_q=%s, recent_D_mcse_q=%s); aggregating current epoch samples before restart" % (epoch_iter_num, total_iter_num, str(post_stall_plateau), str(post_stall_recent_worse), beta_rhat_q_post, D_mcse_q, ("%.4g" % post_stall_recent_beta_rhat_q) if np.isfinite(post_stall_recent_beta_rhat_q) else "NA", ("%.4g" % post_stall_recent_D_mcse_q) if np.isfinite(post_stall_recent_D_mcse_q) else "NA"), INFO)
-                            else:
-                                stop_due_to_stall = True
-                                done = True
-                                log("Post-burn stall detected at iter %d (global %d) and precision is not yet met, but no restart attempts remain; stopping this epoch (beta_Rhat_q=%.4g, D_mcse_q=%.4g)" % (epoch_iter_num, total_iter_num, beta_rhat_q_post, D_mcse_q), INFO)
-
-                    num_post_burn_samples_now = int(np.min(num_sum_Y_m))
-                    if (not done) and num_post_burn_samples_now >= max_num_post_burn_in_for_epoch:
-                        done = True
-                        log("Ending Gibbs epoch at iter %d (global %d) after %d post-burn samples (per-epoch max post-burn reached)" % (epoch_iter_num, total_iter_num, num_post_burn_samples_now), INFO)
-
-                if gene_set_stats_trace_out is not None:
-                    log("Writing gene set stats trace", TRACE)
-                    for chain_num in range(num_chains):
-                        for i in range(len(self.gene_sets)):
-                            if only_gene_sets is None or self.gene_sets[i] in only_gene_sets:
-                                gene_set_stats_trace_fh.write("%d\t%d\t%s\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\t%.4g\n" % (iteration_num+1, trace_chain_offset + chain_num + 1, self.gene_sets[i], full_beta_tildes_m[chain_num,i] / self.scale_factors[i], full_p_values_m[chain_num,i], full_z_scores_m[chain_num,i], full_ses_m[chain_num,i] / self.scale_factors[i], (uncorrected_betas_mean_m[chain_num,i] if use_mean_betas else uncorrected_betas_sample_m[chain_num,i])  / self.scale_factors[i], (full_betas_mean_m[chain_num,i] if use_mean_betas else full_betas_sample_m[chain_num,i]) / self.scale_factors[i], (full_postp_mean_m[chain_num,i] if use_mean_betas else full_postp_sample_m[chain_num,i]), full_z_cur_beta_tildes_m[chain_num,i], R_beta_v[i], betas_sem2_v[i]))
-
-                    gene_set_stats_trace_fh.flush()
-
-                if done:
-                    break
-
-            iterations_run_this_epoch = iteration_num + 1
-            remaining_total_iter -= iterations_run_this_epoch
-            if remaining_total_iter < 0:
-                remaining_total_iter = 0
-
-            #restart if this attempt failed
-            if not gibbs_good:
-                continue
-
-            assert(np.all(num_sum_Y_m > 0))
-            assert(np.all(num_sum_beta_m > 0))
-
-            aggregated_sum_betas_m.append(copy.copy(sum_betas_m))
-            aggregated_sum_betas2_m.append(copy.copy(sum_betas2_m))
-            aggregated_sum_betas_uncorrected_m.append(copy.copy(sum_betas_uncorrected_m))
-            aggregated_sum_betas_uncorrected2_m.append(copy.copy(sum_betas_uncorrected2_m))
-            aggregated_sum_postp_m.append(copy.copy(sum_postp_m))
-            aggregated_sum_beta_tildes_m.append(copy.copy(sum_beta_tildes_m))
-            aggregated_sum_z_scores_m.append(copy.copy(sum_z_scores_m))
-            aggregated_num_sum_beta_m.append(copy.copy(num_sum_beta_m))
-
-            aggregated_sum_Ys_m.append(copy.copy(sum_Ys_m))
-            aggregated_sum_Ys2_m.append(copy.copy(sum_Ys2_m))
-            aggregated_sum_Y_raws_m.append(copy.copy(sum_Y_raws_m))
-            aggregated_sum_log_pos_m.append(copy.copy(sum_log_pos_m))
-            aggregated_sum_log_pos2_m.append(copy.copy(sum_log_pos2_m))
-            aggregated_sum_log_po_raws_m.append(copy.copy(sum_log_po_raws_m))
-            aggregated_sum_log_po_raws2_m.append(copy.copy(sum_log_po_raws2_m))
-            aggregated_sum_priors_m.append(copy.copy(sum_priors_m))
-            aggregated_sum_priors2_m.append(copy.copy(sum_priors2_m))
-            aggregated_sum_Ds_m.append(copy.copy(sum_Ds_m))
-            aggregated_sum_D_raws_m.append(copy.copy(sum_D_raws_m))
-            aggregated_sum_bf_orig_m.append(copy.copy(sum_bf_orig_m))
-            aggregated_sum_bf_uncorrected_m.append(copy.copy(sum_bf_uncorrected_m))
-            aggregated_sum_bf_orig_raw_m.append(copy.copy(sum_bf_orig_raw_m))
-            aggregated_sum_bf_orig_raw2_m.append(copy.copy(sum_bf_orig_raw2_m))
-            aggregated_num_sum_Y_m.append(copy.copy(num_sum_Y_m))
-
-            if self.genes_missing is not None:
-                aggregated_sum_priors_missing_m.append(copy.copy(sum_priors_missing_m))
-                aggregated_sum_Ds_missing_m.append(copy.copy(sum_Ds_missing_m))
-                aggregated_num_sum_priors_missing_m.append(copy.copy(num_sum_priors_missing_m))
-
-            num_completed_epochs += 1
-            log("Completed Gibbs epoch %d/%d (iter=%d, remaining_total_iter=%d)" % (num_completed_epochs, target_num_epochs, iterations_run_this_epoch, remaining_total_iter), INFO)
-
-            if (not stop_due_to_stall) and (not stop_due_to_precision) and num_completed_epochs < target_num_epochs and remaining_total_iter > 0 and num_attempts < max_num_attempt_restarts:
-                continue
-
-            sum_betas_m = np.vstack(aggregated_sum_betas_m)
-            sum_betas2_m = np.vstack(aggregated_sum_betas2_m)
-            sum_betas_uncorrected_m = np.vstack(aggregated_sum_betas_uncorrected_m)
-            sum_betas_uncorrected2_m = np.vstack(aggregated_sum_betas_uncorrected2_m)
-            sum_postp_m = np.vstack(aggregated_sum_postp_m)
-            sum_beta_tildes_m = np.vstack(aggregated_sum_beta_tildes_m)
-            sum_z_scores_m = np.vstack(aggregated_sum_z_scores_m)
-            num_sum_beta_m = np.vstack(aggregated_num_sum_beta_m)
-
-            sum_Ys_m = np.vstack(aggregated_sum_Ys_m)
-            sum_Ys2_m = np.vstack(aggregated_sum_Ys2_m)
-            sum_Y_raws_m = np.vstack(aggregated_sum_Y_raws_m)
-            sum_log_pos_m = np.vstack(aggregated_sum_log_pos_m)
-            sum_log_pos2_m = np.vstack(aggregated_sum_log_pos2_m)
-            sum_log_po_raws_m = np.vstack(aggregated_sum_log_po_raws_m)
-            sum_log_po_raws2_m = np.vstack(aggregated_sum_log_po_raws2_m)
-            sum_priors_m = np.vstack(aggregated_sum_priors_m)
-            sum_priors2_m = np.vstack(aggregated_sum_priors2_m)
-            sum_Ds_m = np.vstack(aggregated_sum_Ds_m)
-            sum_D_raws_m = np.vstack(aggregated_sum_D_raws_m)
-            sum_bf_orig_m = np.vstack(aggregated_sum_bf_orig_m)
-            sum_bf_uncorrected_m = np.vstack(aggregated_sum_bf_uncorrected_m)
-            sum_bf_orig_raw_m = np.vstack(aggregated_sum_bf_orig_raw_m)
-            sum_bf_orig_raw2_m = np.vstack(aggregated_sum_bf_orig_raw2_m)
-            num_sum_Y_m = np.vstack(aggregated_num_sum_Y_m)
-
-            if self.genes_missing is not None:
-                sum_priors_missing_m = np.vstack(aggregated_sum_priors_missing_m)
-                sum_Ds_missing_m = np.vstack(aggregated_sum_Ds_missing_m)
-                num_sum_priors_missing_m = np.vstack(aggregated_num_sum_priors_missing_m)
-
-            num_chains_effective = sum_betas_m.shape[0]
-
-            ##1. calculate mean values for each chain (divide by number -- make sure it is correct; may not be num_avg_Y)
-            #beta_chain_means_m = sum_betas_m / num_sum_beta_m
-            #Y_chain_means_m = sum_Ys_m / num_sum_Y_m
-
-            ##2. calculate median values across chains (one number per gene set/gene)
-            #beta_medians_v = np.median(beta_chain_means_m, axis=0)
-            #Y_medians_v = np.median(Y_chain_means_m, axis=0)
-
-            ##3. calculate abs(difference) between each chain and median (one value per chain/geneset)
-            #beta_mad_m = np.abs(beta_chain_means_m - beta_medians_v)
-            #Y_mad_m = np.abs(Y_chain_means_m - Y_medians_v)
-
-            ##4. calculate median of abs(difference) across chains (one number per gene set/gene)
-            #beta_mad_median_v = np.median(beta_mad_m, axis=0)
-            #Y_mad_median_v = np.median(Y_mad_m, axis=0)
-
-            ##5. mask any chain that is more than 3 median(abs(difference)) from median
-            #beta_outlier_mask_m = beta_chain_means_m > beta_medians_v + 3 * beta_mad_median_v
-            #Y_outlier_mask_m = Y_chain_means_m > Y_medians_v + 3 * Y_mad_median_v
-
-            ##6. take average only across chains that are not outliers
-            #num_sum_beta_v = np.sum(~beta_outlier_mask_m, axis=0)
-            #num_sum_Y_v = np.sum(~Y_outlier_mask_m, axis=0)
-
-            ##should never happen but just in case
-            #num_sum_beta_v[num_sum_beta_v == 0] = 1
-            #num_sum_Y_v[num_sum_Y_v == 0] = 1
-
-            ##7. to do this, zero out outlier chains, then sum them, then divide by number of outliers
-            #sum_Ys_m[Y_outlier_mask_m] = 0
-            #avg_Ys_v = np.sum(sum_Ys_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-
-            Y_outlier_mask_m, avg_Ys_v = __outlier_resistant_mean(sum_Ys_m, num_sum_Y_m)
-            beta_outlier_mask_m, avg_betas_v = __outlier_resistant_mean(sum_betas_m, num_sum_beta_m)
-            
-            _, avg_Y_raws_v = __outlier_resistant_mean(sum_Y_raws_m, num_sum_Y_m)
-
-            #sum_log_pos_m[Y_outlier_mask_m] = 0
-            #avg_log_pos_v = np.sum(sum_log_pos_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_log_pos_v = __outlier_resistant_mean(sum_log_pos_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            _, avg_log_po_raws_v = __outlier_resistant_mean(sum_log_po_raws_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            #sum_log_pos2_m[Y_outlier_mask_m] = 0
-            #avg_log_pos2_v = np.sum(sum_log_pos2_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_log_pos2_v = __outlier_resistant_mean(sum_log_pos2_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            #sum_Ds_m[Y_outlier_mask_m] = 0
-            #avg_Ds_v = np.sum(sum_Ds_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_Ds_v = __outlier_resistant_mean(sum_Ds_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            _, avg_D_raws_v = __outlier_resistant_mean(sum_D_raws_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            #sum_priors_m[Y_outlier_mask_m] = 0
-            #avg_priors_v = np.sum(sum_priors_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_priors_v = __outlier_resistant_mean(sum_priors_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            #sum_bf_orig_m[Y_outlier_mask_m] = 0
-            #avg_bf_orig_v = np.sum(sum_bf_orig_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_bf_orig_v = __outlier_resistant_mean(sum_bf_orig_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            #sum_bf_orig_raw_m[Y_outlier_mask_m] = 0
-            #avg_bf_orig_raw_v = np.sum(sum_bf_orig_raw_m / num_sum_Y_m, axis=0) / num_sum_Y_v
-            _, avg_bf_orig_raw_v = __outlier_resistant_mean(sum_bf_orig_raw_m, num_sum_Y_m, Y_outlier_mask_m)
-
-            if self.genes_missing is not None:
-                #priors_missing_chain_means_m = sum_priors_missing_m / num_sum_priors_missing_m
-                #priors_missing_medians_v = np.median(priors_missing_chain_means_m, axis=0)
-                #priors_missing_mad_m = np.abs(priors_missing_chain_means_m - priors_missing_medians_v)
-                #priors_missing_mad_median_v = np.median(priors_missing_mad_m, axis=0)
-                #priors_missing_outlier_mask_m = priors_missing_chain_means_m > priors_missing_medians_v + 3 * priors_missing_mad_median_v
-                #num_sum_priors_missing_v = np.sum(~priors_missing_outlier_mask_m, axis=0)
-                #num_sum_priors_missing_v[num_sum_priors_missing_v == 0] = 1
-
-                #assert(np.all(num_sum_priors_missing_m > 0))
-                #sum_priors_missing_m[priors_missing_outlier_mask_m] = 0
-                #avg_priors_missing_v = np.sum(sum_priors_missing_m / num_sum_priors_missing_m, axis=0) / num_sum_priors_missing_v
-
-                priors_missing_outlier_mask_m, avg_priors_missing_v = __outlier_resistant_mean(sum_priors_missing_m, num_sum_priors_missing_m)
-
-                #sum_Ds_missing_m[priors_missing_outlier_mask_m] = 0
-                #avg_Ds_missing_v = np.sum(sum_Ds_missing_m / num_sum_priors_missing_m, axis=0) / num_sum_priors_missing_v
-                _, avg_Ds_missing_v = __outlier_resistant_mean(sum_Ds_missing_m, num_sum_priors_missing_m, priors_missing_outlier_mask_m)
-
-            #sum_betas_m[beta_outlier_mask_m] = 0
-            #avg_betas_v = np.sum(sum_betas_m / num_sum_beta_m, axis=0) / num_sum_beta_v
-            #we did this above
-
-            #sum_betas_uncorrected_m[beta_outlier_mask_m] = 0
-            #avg_betas_uncorrected_v = np.sum(sum_betas_uncorrected_m / num_sum_beta_m, axis=0) / num_sum_beta_v
-            _, avg_betas_uncorrected_v = __outlier_resistant_mean(sum_betas_uncorrected_m, num_sum_beta_m, beta_outlier_mask_m)
-
-            #sum_postp_m[beta_outlier_mask_m] = 0
-            #avg_postp_v = np.sum(sum_postp_m / num_sum_beta_m, axis=0) / num_sum_beta_v
-            _, avg_postp_v = __outlier_resistant_mean(sum_postp_m, num_sum_beta_m, beta_outlier_mask_m)
-
-            #sum_beta_tildes_m[beta_outlier_mask_m] = 0
-            #avg_beta_tildes_v = np.sum(sum_beta_tildes_m / num_sum_beta_m, axis=0) / num_sum_beta_v
-            _, avg_beta_tildes_v = __outlier_resistant_mean(sum_beta_tildes_m, num_sum_beta_m, beta_outlier_mask_m)
-
-            #sum_z_scores_m[beta_outlier_mask_m] = 0
-            #avg_z_scores_v = np.sum(sum_z_scores_m / num_sum_beta_m, axis=0) / num_sum_beta_v
-            _, avg_z_scores_v = __outlier_resistant_mean(sum_z_scores_m, num_sum_beta_m, beta_outlier_mask_m)
-
-            num_post_burn_in_Y = int(np.min(num_sum_Y_m))
-            num_post_burn_in_beta = int(np.min(num_sum_beta_m))
-
-            _, _, prior_r_hat_v, _ = __calculate_R(sum_priors_m, sum_priors2_m, num_post_burn_in_Y)
-            _, _, combined_r_hat_v, _ = __calculate_R(sum_log_po_raws_m, sum_log_po_raws2_m, num_post_burn_in_Y)
-            _, _, log_bf_r_hat_v, _ = __calculate_R(sum_bf_orig_raw_m, sum_bf_orig_raw2_m, num_post_burn_in_Y)
-
-            _, _, beta_r_hat_v, _ = __calculate_R(sum_betas_m, sum_betas2_m, num_post_burn_in_beta)
-            _, _, beta_uncorrected_r_hat_v, _ = __calculate_R(sum_betas_uncorrected_m, sum_betas_uncorrected2_m, num_post_burn_in_beta)
-
-            prior_chain_means_m = __means_from_sums(sum_priors_m, num_sum_Y_m)
-            combined_chain_means_m = __means_from_sums(sum_log_po_raws_m, num_sum_Y_m)
-            log_bf_chain_means_m = __means_from_sums(sum_bf_orig_raw_m, num_sum_Y_m)
-            beta_chain_means_m = __means_from_sums(sum_betas_m, num_sum_beta_m)
-            beta_uncorrected_chain_means_m = __means_from_sums(sum_betas_uncorrected_m, num_sum_beta_m)
-
-            prior_mcse_v = np.sqrt(np.var(prior_chain_means_m, axis=0, ddof=1) / float(num_chains_effective))
-            combined_mcse_v = np.sqrt(np.var(combined_chain_means_m, axis=0, ddof=1) / float(num_chains_effective))
-            log_bf_mcse_v = np.sqrt(np.var(log_bf_chain_means_m, axis=0, ddof=1) / float(num_chains_effective))
-            beta_mcse_v = np.sqrt(np.var(beta_chain_means_m, axis=0, ddof=1) / float(num_chains_effective))
-            beta_uncorrected_mcse_v = np.sqrt(np.var(beta_uncorrected_chain_means_m, axis=0, ddof=1) / float(num_chains_effective))
-
-            self.beta_tildes = avg_beta_tildes_v
-            self.z_scores = avg_z_scores_v
-            self.p_values = 2*scipy.stats.norm.cdf(-np.abs(self.z_scores))
-            self.ses = np.full(self.beta_tildes.shape, 100.0)
-            self.ses[self.z_scores != 0] = np.abs(self.beta_tildes[self.z_scores != 0] / self.z_scores[self.z_scores != 0])
-
-            self.betas = avg_betas_v
-            self.betas_uncorrected = avg_betas_uncorrected_v
-            self.betas_r_hat = beta_r_hat_v
-            self.betas_mcse = beta_mcse_v
-            self.betas_uncorrected_r_hat = beta_uncorrected_r_hat_v
-            self.betas_uncorrected_mcse = beta_uncorrected_mcse_v
-            self.inf_betas = None
-            self.non_inf_avg_cond_betas = None
-            self.non_inf_avg_postps = avg_postp_v
-
-            #priors_missing is at the end
-            self.priors = avg_priors_v
-            self.priors_r_hat = prior_r_hat_v
-            self.priors_mcse = prior_mcse_v
-            self.priors_missing = avg_priors_missing_v
-            self.combined_Ds_missing = avg_Ds_missing_v
-
-            self.Y_for_regression = avg_bf_orig_v
-            self.Y = avg_bf_orig_raw_v
-            self.Y_r_hat = log_bf_r_hat_v
-            self.Y_mcse = log_bf_mcse_v
-
-            self.combined_Ds_for_regression = avg_Ds_v
-            self.combined_Ds = avg_D_raws_v
-
-            self.combined_prior_Ys_for_regression = avg_log_pos_v - self.background_log_bf
-            self.combined_prior_Ys = avg_log_po_raws_v - self.background_log_bf
-            self.combined_prior_Ys_r_hat = combined_r_hat_v
-            self.combined_prior_Ys_mcse = combined_mcse_v
-
-            #self.combined_prior_Y_ses = avg_log_pos_ses
-
-            gene_N = self.get_gene_N()
-            gene_N_missing = self.get_gene_N(get_missing=True)
-
-            all_gene_N = gene_N
-            if self.genes_missing is not None:
-                assert(gene_N_missing is not None)
-                all_gene_N = np.concatenate((all_gene_N, gene_N_missing))
-
-            total_priors = np.concatenate((self.priors, self.priors_missing))
-            priors_slope = np.cov(total_priors, all_gene_N)[0,1] / np.var(all_gene_N)
-            priors_intercept = np.mean(total_priors - all_gene_N * priors_slope)
-
-            if adjust_priors:
-                log("Adjusting priors with slope %.4g" % priors_slope)
-                self.priors_adj = self.priors - priors_slope * gene_N - priors_intercept
-                if self.genes_missing is not None:
-                    self.priors_adj_missing = self.priors_missing - priors_slope * gene_N_missing
-
-                combined_slope = np.cov(self.combined_prior_Ys, gene_N)[0,1] / np.var(gene_N)
-                combined_intercept = np.mean(self.combined_prior_Ys - gene_N * combined_slope)
-
-                log("Adjusting combined with slope %.4g" % combined_slope)
-                self.combined_prior_Ys_adj = self.combined_prior_Ys - combined_slope * gene_N - combined_intercept
-
-            if gibbs_good:
-                break
-
-        if gene_set_stats_trace_fh is not None:
-            gene_set_stats_trace_fh.close()
-        if gene_stats_trace_fh is not None:
-            gene_stats_trace_fh.close()
-
-        if num_completed_epochs == 0:
-            bail("Gibbs failed to complete any successful epochs within restart/iteration limits")
-
-        log("Aggregated %d Gibbs epoch(s) into %d effective chains" % (num_completed_epochs, num_completed_epochs * num_chains), INFO)
 
     def _append_with_any_user(self, P):
         if P is None:
@@ -11480,79 +8041,6 @@ class GeneSetData(object):
         return W, H, n_like[-1], n_evid[-1], n_lambda[-1], n_error[-1]
 
     #this code is adapted from https://github.com/gwas-partitioning/bnmf-clustering
-    def _bayes_nmf_l2(self, V0, n_iter=10000, a0=10, tol=1e-7, K=15, K0=15, phi=1.0):
-
-        n_iter=100
-
-        # Bayesian NMF with half-normal priors for W and H
-        # V0: input z-score matrix (variants x traits)
-        # n_iter: Number of iterations for parameter optimization
-        # a0: Hyper-parameter for inverse gamma prior on ARD relevance weights
-        # tol: Tolerance for convergence of fitting procedure
-        # K: Number of clusters to be initialized (algorithm may drive some to zero)
-        # K0: Used for setting b0 (lambda prior hyper-parameter) -- should be equal to K
-        # phi: Scaling parameter
-
-        eps = 1.e-50
-        delambda = 1.0
-        #active_nodes = np.sum(V0, axis=0) != 0
-        #V0 = V0[:,active_nodes]
-        V = V0 - np.min(V0)
-        Vmin = np.min(V)
-        Vmax = np.max(V)
-        N = V.shape[0]
-        M = V.shape[1]
-
-
-        W = np.random.random((N, K)) * Vmax #NxK
-        H = np.random.random((K, M)) * Vmax #KxM
-
-        I = np.ones((N, M)) #NxM
-        V_ap = W.dot(H) + eps #NxM
-
-        phi = np.power(np.std(V), 2) * phi
-        C = (N + M) / 2 + a0 + 1
-        b0 = 3.14 * (a0 - 1) * np.mean(V) / (2 * K0)
-        lambda_bound = b0 / C
-        lambdak = (0.5 * np.sum(np.power(W, 2), axis=0) + 0.5 * np.sum(np.power(H, 2), axis=1) + b0) / C
-        lambda_cut = lambda_bound * 1.5
-
-
-        n_like = [None]
-        n_evid = [None]
-        n_error = [None]
-        n_lambda = [lambdak]
-        it = 1
-        count = 1
-        while delambda >= tol and it < n_iter:
-
-            H = H * (W.T.dot(V)) / (W.T.dot(V_ap) + phi * H * np.repeat(1/lambdak, M).reshape(len(lambdak), M) + eps)
-            V_ap = W.dot(H) + eps
-            W = W * (V.dot(H.T)) / (V_ap.dot(H.T) + phi * W * np.tile(1/lambdak, N).reshape(N, len(lambdak)) + eps)
-            V_ap = W.dot(H) + eps
-            lambdak = (0.5 * np.sum(np.power(W, 2), axis=0) + 0.5 * np.sum(np.power(H, 2), axis=1) + b0) / C
-            delambda = np.max(np.abs(lambdak - n_lambda[it - 1]) / n_lambda[it - 1])
-            like = np.sum(np.power(V - V_ap, 2)) / 2
-            n_like.append(like)
-            n_evid.append(like + phi * np.sum((0.5 * np.sum(np.power(W, 2), axis=0) + 0.5 * np.sum(np.power(H, 2), axis=1) + b0) / lambdak + C * np.log(lambdak)))
-            n_lambda.append(lambdak)
-            n_error.append(np.sum(np.power(V - V_ap, 2)))
-            if it % 100 == 0:
-                log("Iteration=%d; evid=%.3g; lik=%.3g; err=%.3g; delambda=%.3g; factors=%d; factors_non_zero=%d" % (it, n_evid[it], n_like[it], n_error[it], delambda, np.sum(np.sum(W, axis=0) != 0), np.sum(lambdak >= lambda_cut)), TRACE)
-            it += 1
-
-        W[W < eps] = 0
-        H[H < eps] = 0
-
-        return W, H, n_like[-1], n_evid[-1], n_lambda[-1], n_error[-1]
-            #W # Variant weight matrix (N x K)
-            #H # Trait weight matrix (K x M)
-            #n_like # List of reconstruction errors (sum of squared errors / 2) per iteration
-            #n_evid # List of negative log-likelihoods per iteration
-            #n_lambda # List of lambda vectors (shared weights for each of K clusters, some ~0) per iteration
-            #n_error # List of reconstruction errors (sum of squared errors) per iteration
-
-
     def num_factors(self):
         if self.exp_lambdak is None:
             return 0
@@ -11580,7 +8068,7 @@ class GeneSetData(object):
                 return (1 - specific_weight) * loadings + specific_weight * specific_loadings
 
 
-    def run_factor(self, max_num_factors=15, phi=1.0, alpha0=10, beta0=1, gene_set_filter_type=None, gene_set_filter_value=None, gene_or_pheno_filter_type=None, gene_or_pheno_filter_value=None, pheno_prune_value=None, pheno_prune_number=None, gene_prune_value=None, gene_prune_number=None, gene_set_prune_value=None, gene_set_prune_number=None, anchor_pheno_mask=None, anchor_gene_mask=None, anchor_any_pheno=False, anchor_any_gene=False, anchor_gene_set=False, run_transpose=True, max_num_iterations=100, rel_tol=1e-4, min_lambda_threshold=1e-3, lmm_auth_key=None, lmm_model=None, label_gene_sets_only=False, label_include_phenos=False, label_individually=False, keep_original_loadings=False, project_phenos_from_gene_sets=False):
+    def run_factor(self, max_num_factors=15, phi=1.0, alpha0=10, beta0=1, gene_set_filter_type=None, gene_set_filter_value=None, gene_or_pheno_filter_type=None, gene_or_pheno_filter_value=None, pheno_prune_value=None, pheno_prune_number=None, gene_prune_value=None, gene_prune_number=None, gene_set_prune_value=None, gene_set_prune_number=None, anchor_pheno_mask=None, anchor_gene_mask=None, anchor_any_pheno=False, anchor_any_gene=False, anchor_gene_set=False, run_transpose=True, max_num_iterations=100, rel_tol=1e-4, min_lambda_threshold=1e-3, lmm_auth_key=None, lmm_model=None, lmm_provider="openai", label_gene_sets_only=False, label_include_phenos=False, label_individually=False, keep_original_loadings=False, project_phenos_from_gene_sets=False):
 
         if self.X_orig is None:
             bail("Cannot run factoring without X")
@@ -12261,7 +8749,7 @@ class GeneSetData(object):
                 else:
                     prompt = "Print a label, five words maximum, for each group. Print only labels, one per line, label number folowed by text: %s" % (labels)
                 log("Querying LMM with prompt: %s" % prompt)
-                response = query_lmm(prompt, lmm_auth_key, lmm_model=lmm_model)
+                response = query_lmm(prompt, lmm_auth_key, lmm_model=lmm_model, lmm_provider=lmm_provider)
                 if response is not None:
                     try:
                         responses = response.strip('\n').split("\n")
@@ -12751,50 +9239,6 @@ class GeneSetData(object):
 
                     if self.priors is not None:
                         self.pheno_combined_prior_Ys_vs_input_priors_beta, self.pheno_combined_prior_Ys_vs_input_priors_beta_tilde, self.pheno_combined_prior_Ys_vs_input_priors_se, self.pheno_combined_prior_Ys_vs_input_priors_Z, self.pheno_combined_prior_Ys_vs_input_priors_p_value, _ = __update_pheno_vec(self.pheno_combined_prior_Ys_vs_input_priors_beta, self.pheno_combined_prior_Ys_vs_input_priors_beta_tilde, self.pheno_combined_prior_Ys_vs_input_priors_se, self.pheno_combined_prior_Ys_vs_input_priors_Z, self.pheno_combined_prior_Ys_vs_input_priors_p_value, None, beta[2,:], beta_tilde[2,:], se[2,:], Z[2,:], p_value[2,:], None)
-
-    def run_sim(self, sigma2, p, sigma_power, log_bf_noise_sigma_mult=0, treat_sigma2_as_sigma2_cond=True, only_positive=False):
-
-        if sigma2 is None or sigma2 <= 0:
-            bail("Require positive --sigma2 for simulations")
-        if p is None:
-            bail("Require --p-noninf for simulations")
-        if sigma_power is None:
-            bail("Require --sigma-power for simulations")
-        if self.X_orig is None:
-            bail("Require --X-in for simulations")
-        
-        log("Simulating gene set and gene values")
-        #first simulate the sigmas
-        self.betas = np.zeros(len(self.gene_sets))
-        non_zero_gene_sets = np.random.random(self.betas.shape) < p
-
-        scaled_sigma2s = self.get_scaled_sigma2(self.scale_factors, sigma2, sigma_power)
-
-        #since we are only simulating for those that have non-zeros, we need to use conditional sigma2
-        if treat_sigma2_as_sigma2_cond:
-            sigma2_conds = scaled_sigma2s[non_zero_gene_sets]
-            log("Using p=%.3g, sigma2_cond=%.3g" % (p, sigma2))
-        else:
-            sigma2_conds = scaled_sigma2s[non_zero_gene_sets] / p
-            log("Using p=%.3g, sigma2_cond=%.3g" % (p, sigma2/p))
-
-        self.betas[non_zero_gene_sets] = scipy.stats.norm.rvs(0, np.sqrt(sigma2_conds), np.sum(non_zero_gene_sets)).ravel()
-
-        if only_positive:
-            self.betas = np.abs(self.betas)
-
-        #now simulate the gene values
-        self.priors = self.X_orig.dot(self.betas / self.scale_factors)
-
-        if log_bf_noise_sigma_mult > 0:
-            #here we don't divide by p since we are adding noise to every beta, not just non zero ones
-            noise_add_betas = scipy.stats.norm.rvs(0, np.sqrt(scaled_sigma2s * log_bf_noise_sigma_mult), self.betas.shape)
-            self.Y = self.priors + self.X_orig.dot(noise_add_betas / self.scale_factors)
-        else:
-            self.Y = self.priors
-
-        self._set_Y(self.Y, self.Y, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts)
-
 
     def get_col_sums(self, X, num_nonzero=False, axis=0):
         if num_nonzero:
@@ -14488,12 +10932,6 @@ class GeneSetData(object):
 
         return (gene_bfs, extra_genes, np.array(extra_gene_bfs), gene_in_combined, gene_in_priors)
 
-    def _read_gene_zs(self, *args, **kwargs):
-        bail("Gene-Z score input mode has been removed; use --gene-stats-in or --gwas-in")
-
-    def _read_gene_percentiles(self, *args, **kwargs):
-        bail("Gene-percentile input mode has been removed; use --gene-stats-in or --gwas-in")
-
     def _read_gene_covs(self, gene_covs_in, gene_covs_id_col=None, gene_covs_cov_cols=None, **kwargs):
 
         #require X matrix
@@ -14557,18 +10995,6 @@ class GeneSetData(object):
 
         return (cov_names, gene_covs, extra_genes, np.array(extra_gene_covs))
 
-
-    def convert_prior_to_var(self, top_prior, num, frac):
-        top_bf = np.log((top_prior) / (1 - top_prior)) - self.background_log_bf 
-        if top_bf <= 0:
-            bail("--top-gene-set-prior must be above background (%.4g)" % self.background_prior) 
-        if frac is None:
-            frac = 1
-        if frac <= 0 or frac > 1:
-            bail("--frac-gene-sets-for-prior must be in (0,1]")
-        var = frac * np.square(top_bf / (-scipy.stats.norm.ppf(1.0 / (num * frac))))
-
-        return var
 
     def _determine_columns(self, filename):
         #try to determine columns for gene_id, var_id, chrom, pos, p, beta, se, freq, n
@@ -14746,19 +11172,6 @@ class GeneSetData(object):
         orig_header_cols = np.array(orig_header_cols)
 
         return (orig_header_cols[possible_gene_id_cols], orig_header_cols[possible_var_id_cols], orig_header_cols[possible_chrom_cols], orig_header_cols[possible_pos_cols], orig_header_cols[possible_locus_cols], orig_header_cols[possible_p_cols], orig_header_cols[possible_beta_cols], orig_header_cols[possible_se_cols], orig_header_cols[possible_freq_cols], orig_header_cols[possible_n_cols], header)
-
-    def _adjust_bf(self, Y, min_mean_bf, max_mean_bf):
-        Y_to_use = np.exp(Y)
-        Y_mean = np.mean(Y_to_use)
-        if min_mean_bf is not None and Y_mean < min_mean_bf:
-            scale_factor = min_mean_bf / Y_mean
-            log("Scaling up BFs by %.4g" % scale_factor)
-            Y_to_use = Y_to_use * scale_factor
-        elif max_mean_bf is not None and Y_mean > max_mean_bf:
-            scale_factor = max_mean_bf / Y_mean
-            log("Scaling down BFs by %.4g" % scale_factor)
-            Y_to_use = Y_to_use * max_mean_bf / Y_mean
-        return np.log(Y_to_use)
 
     def _complete_p_beta_se(self, p, beta, se):
         p_none_mask = np.logical_or(p == None, np.isnan(p))
@@ -15656,225 +12069,6 @@ class GeneSetData(object):
         #the inflation factors have already been accounted for above
         return self._finalize_regression(betas, final_ses, se_inflation_factors=None)
 
-    def _compute_multivariate_beta_tildes_huber_correlated(self, X, Y, resid_correlation_matrix=None, covs=None, add_intercept=True, delta=1.0, max_iter=100, tol=1e-6, rel_tol=0.01):
-        """
-        Perform a naive "Huber + correlation" regression:
-          1) Fit a Huber-type IRLS ignoring correlation.
-          2) Post-hoc sandwich correction of standard errors using
-             the provided sparse correlation matrices.
-
-        Parameters
-        ----------
-        X : ndarray of shape (genes, factors)
-            Rows represent genes, columns represent factors (predictors).
-
-        Y : ndarray of shape (phenos, genes)
-            Rows represent phenotypes, columns represent genes (observations).
-
-        resid_correlation_matrix : list of sparse (genes x genes) or None
-            If provided, must have length == number of phenotypes. Each
-            entry is the correlation matrix for that phenotype. We apply
-            a naive "sandwich" correction to the final standard errors.
-
-        covs : ndarray of shape (genes, n_covs) or None
-            Additional covariates where rows = covariates, cols = genes.
-
-        add_intercept : bool
-            If True, add a column of ones as intercept.
-
-        delta : float
-            Huber threshold parameter.
-
-        max_iter : int
-            Maximum IRLS iterations.
-
-        tol : float
-            Convergence tolerance (Frobenius norm difference in betas).
-
-        Returns
-        -------
-        betas : ndarray of shape (phenos, k)
-            Robust regression coefficients. (k = # factors + # covs + [1 if intercept])
-
-        ses : ndarray of shape (phenos, k)
-            "Sandwich"-adjusted standard errors (if resid_correlation_matrix is provided);
-            otherwise, approximate robust SE ignoring correlation.
-
-        pvals : ndarray of shape (phenos, k)
-            Two-sided p-values for each coefficient.
-
-        zscores : ndarray of shape (phenos, k)
-            Z-scores for each coefficient.
-
-        Notes
-        -----
-        - This method is *not* a rigorous robust + correlated approach. It simply:
-           (a) obtains robust betas via Huber IRLS ignoring correlation,
-           (b) applies a naive post-hoc "correlation sandwich" to the variance.
-
-        - We carefully multiply by each R_p (which is sparse) to avoid blowing up memory.
-        """
-
-        # --------------------------------------------------------------------
-        # 0) Build the design matrix: X_design
-        # --------------------------------------------------------------------
-        # X: (genes, factors)
-        X_design = X
-        if add_intercept:
-            ones_col = np.ones((X.shape[0], 1))
-            X_design = np.hstack([X_design, ones_col])  # now (genes, factors + 1)
-
-        if covs is not None:
-            # covs is (genes, n_covs) or (genes,) if you do covs[:, np.newaxis] above
-            if len(covs.shape) == 1:
-                covs = covs[:, np.newaxis]
-            X_design = np.hstack([X_design, covs])  # final shape (genes, k)
-
-        n_obs, n_pred = X_design.shape
-        n_phenos = Y.shape[0]
-        Y_t = Y.T  # (genes, phenos)
-
-        # --------------------------------------------------------------------
-        # 1) Huber IRLS ignoring correlation to get robust betas
-        # --------------------------------------------------------------------
-        def __huber_weight(resid, d):
-            """w(r) = 1 if |r| <= d, else d / |r|."""
-            w_ = np.ones_like(resid)
-            mask_out = np.abs(resid) > d
-            w_[mask_out] = d / np.abs(resid[mask_out])
-            return w_
-
-        def __huber_loss(resid, d):
-            """
-            piecewise huber:
-              0.5*r^2 if |r| <= d,  d*(|r| - 0.5*d) otherwise.
-            """
-            out_ = np.zeros_like(resid)
-            mask_in = np.abs(resid) <= d
-            mask_out = ~mask_in
-            out_[mask_in] = 0.5 * resid[mask_in]**2
-            out_[mask_out] = d * (np.abs(resid[mask_out]) - 0.5*d)
-            return out_
-
-        # Initial guess: regular least squares
-        # np.linalg.lstsq => returns coefs in shape (n_pred, phenos)
-        W0, _, _, _ = np.linalg.lstsq(X_design, Y_t, rcond=None)
-        betas_rob = W0.T  # => shape (phenos, n_pred)
-
-        # X_expand shaped (phenos, genes, n_pred)
-        # so axis=0 = phenos, axis=1 = genes, axis=2 = n_pred
-        # We repeat along phenos dimension:
-        X_expand = np.repeat(X_design[np.newaxis, :, :], n_phenos, axis=0)
-        # => (phenos, genes, n_pred)
-
-        for _ in range(max_iter):
-            # shape => (genes, phenos)
-            Y_hat = X_design @ betas_rob.T
-            resid = Y_t - Y_hat
-
-            # robust weights => shape (genes, phenos)
-            w_ij_orig = __huber_weight(resid, delta)
-
-            # Transpose to (phenos, genes) so it lines up with X_expand
-            #   which is (phenos, genes, n_pred).
-            w_ij = w_ij_orig.T  # => (phenos, genes)
-
-            # Now broadcast: multiply each row j by w_ij[p, j]
-            # X_expand is (phenos, genes, n_pred), w_ij is (phenos, genes)
-            # => w_ij[..., None] => (phenos, genes, 1)
-            X_expand_w = X_expand * w_ij[..., None]
-
-            # X^T W X => shape (phenos, n_pred, n_pred)
-            # We do "ijk, jh -> ikh"
-            # i=phenos, j=genes, k=n_pred, h=n_pred
-            XTwX = np.einsum('ijk,jh->ikh', X_expand_w, X_design)
-
-            # X^T W Y => shape (phenos, n_pred)
-            # "ijk, ji->ik" => i=phenos, j=genes, k=n_pred
-            # But we want to multiply X_expand_w by Y_t => shape(genes, phenos)
-            # => also note we need to use the shape from the same orientation
-            XTwY = np.einsum('ijk,ji->ik', X_expand_w, Y_t)
-
-            betas_new = np.zeros_like(betas_rob)  # (phenos, n_pred)
-            for p in range(n_phenos):
-                betas_new[p, :] = np.linalg.solve(XTwX[p], XTwY[p])
-
-            diff = np.linalg.norm(betas_new - betas_rob, ord='fro')
-            rel_diff = np.max(np.abs(W_new - W) / (np.abs(W_new) + np.abs(W) + 1e-20))
-
-            betas_rob = betas_new
-            log("Absolute diff=%.3g; rel_diff=%.3g" % (diff, rel_diff), TRACE)
-            if diff < tol:
-                break
-            if rel_diff < rel_tol:
-                break
-
-        # Final residuals
-        Y_hat = X_design @ betas_rob.T
-        resid = Y_t - Y_hat
-
-        # Huber "loss SSE"
-        huber_vals = __huber_loss(resid, delta)  # (genes, phenos)
-        sse = np.sum(huber_vals, axis=0)      # (phenos,)
-
-        df = n_obs - n_pred
-        if df <= 0:
-            raise ValueError("Degrees of freedom <= 0; check input sizes.")
-
-        # Approx. robust residual variance
-        sigma2 = sse / df  # shape (phenos,)
-
-        # We'll also need (X^T X)^{-1} for a quasi-variance approach
-        XtX = X_design.T @ X_design
-        XtX_inv = np.linalg.inv(XtX)
-
-        # 2) "Base" robust standard errors ignoring correlation
-        diag_inv = np.diag(XtX_inv)  # (n_pred,)
-        base_ses = np.sqrt(sigma2[:, None] * diag_inv[None, :])  # (phenos, n_pred)
-
-        # 3) If no correlation matrix => Done
-        #    Else do naive "sandwich" for correlated data
-        if resid_correlation_matrix is None:
-            final_ses = base_ses
-        else:
-            if len(resid_correlation_matrix) != n_phenos:
-                raise ValueError("resid_correlation_matrix must match number of phenotypes.")
-
-            final_ses = np.zeros_like(base_ses)  # shape (phenos, n_pred)
-
-            # We'll reuse w_ij_orig for the final sandwich step, which is shape (genes, phenos)
-            for p in range(n_phenos):
-                R_p = resid_correlation_matrix[p]  # (genes, genes)
-                # robust weights for phenotype p => w_ij_orig[:, p] => shape (genes,)
-                w_vec = np.sqrt(w_ij_orig[:, p])
-
-                # WeightedX => multiply each row i by w_vec[i]
-                WeightedX = X_design * w_vec[:, None]  # shape (genes, n_pred)
-
-                # Then multiply by R_p => shape => (genes, n_pred)
-                if sparse.issparse(R_p):
-                    WeightedX_R = R_p.dot(WeightedX)
-                else:
-                    WeightedX_R = R_p @ WeightedX
-
-                # WeightedX^T * WeightedX_R => (n_pred, n_pred)
-                XtRprimeX = WeightedX.T @ WeightedX_R
-
-                var_betas_p = XtX_inv @ XtRprimeX @ XtX_inv
-                se_p = np.sqrt(np.diag(var_betas_p))
-                final_ses[p, :] = se_p
-
-        # ------------------------------------
-        # 6) Optionally strip out covariate betas
-        # ------------------------------------
-        if covs is not None or add_intercept:
-            n_factors = X.shape[1]  # Number of factors (columns in X)
-            betas_rob = betas_rob[:, :n_factors]  # Only the factor betas
-            final_ses = final_ses[:, :n_factors]  # Corresponding standard errors
-
-        # 4) Compute z-scores & p-values
-        return self._finalize_regression(betas_rob, final_ses, se_inflation_factors=None)
-
     def _compute_robust_betas(self, X, Y, resid_correlation_matrix=None, covs=None, add_intercept=True, delta=1.0, max_iter=100, tol=1e-6, rel_tol=0.01):
 
         log("Calculating robust beta tildes", DEBUG)
@@ -16584,61 +12778,6 @@ class GeneSetData(object):
 
         return (beta_tildes, ses, z_scores, p_values, se_inflation_factors)
 
-    def _calculate_inf_betas(self, beta_tildes=None, ses=None, V=None, V_cor=None, se_inflation_factors=None, V_inv=None, scale_factors=None, is_dense_gene_set=None):
-        if V is None:
-            bail("Require V")
-        if beta_tildes is None:
-            beta_tildes = self.beta_tildes
-        if ses is None:
-            ses = self.ses
-        if scale_factors is None:
-            scale_factors = self.scale_factors
-        if is_dense_gene_set is None:
-            is_dense_gene_set = self.is_dense_gene_set
-
-        if V is None:
-            bail("V is required for this operation")
-        if beta_tildes is None:
-            bail("Cannot calculate sigma with no stats loaded!")
-        if self.sigma2 is None:
-            bail("Need sigma to calculate betas!")
-
-        log("Calculating infinitesimal betas")
-        sigma2 = self.sigma2
-        if self.sigma_power is not None:
-            #sigma2 = self.sigma2 * np.power(scale_factors, self.sigma_power)
-            sigma2 = self.get_scaled_sigma2(scale_factors, self.sigma2, self.sigma_power, self.sigma_threshold_k, self.sigma_threshold_xo)
-
-            #for dense gene sets, scaling by size doesn't make sense. So use mean size across sparse gene sets
-            if np.sum(is_dense_gene_set) > 0:
-                if np.sum(~is_dense_gene_set) > 0:
-                    #sigma2[is_dense_gene_set] = self.sigma2 * np.power(np.mean(scale_factors[~is_dense_gene_set]), self.sigma_power)
-                    sigma2[is_dense_gene_set] = self.get_scaled_sigma2(np.mean(scale_factors[~is_dense_gene_set]), self.sigma2, self.sigma_power, self.sigma_threshold_k, self.sigma_threshold_xo)
-
-                else:
-                    #sigma2[is_dense_gene_set] = self.sigma2 * np.power(np.mean(scale_factors), self.sigma_power)
-                    sigma2[is_dense_gene_set] = self.get_scaled_sigma2(np.mean(scale_factors), self.sigma2, self.sigma_power, self.sigma_threshold_k, self.sigma_threshold_xo)
-
-        orig_shrinkage_fac=np.diag(np.square(ses)/sigma2)
-        shrinkage_fac = orig_shrinkage_fac
-
-        #handle corrected OLS case
-        if V_cor is not None and se_inflation_factors is not None:
-            if V_inv is None:
-                V_inv = self._invert_sym_matrix(V)
-            shrinkage_fac = V_cor.dot(V_inv).dot(shrinkage_fac / np.square(se_inflation_factors))
-            shrinkage_inv = self._invert_matrix(V + shrinkage_fac)
-            return shrinkage_inv.dot(beta_tildes)
-        else:
-            cho_factor = scipy.linalg.cho_factor(V + shrinkage_fac)
-            return scipy.linalg.cho_solve(cho_factor, beta_tildes)
-
-    #there are two levels of parallelization here:
-    #1. num_chains: sample multiple independent chains with the same beta/se/V
-    #2. multiple parallel runs with different beta/se (and potentially V). To do this, pass in lists of beta and se (must be the same length) and an optional list of V (V must have same length as beta OR must be not a list, in which case the same V will be used for all betas and ses
-
-    #to run this in parallel, pass in two-dimensional matrix for beta_tildes (rows are parallel runs, columns are beta_tildes)
-    #you can pass in multiple V as well with rows/columns mapping to gene sets and a first dimension mapping to parallel runs
     def _calculate_non_inf_betas(self, initial_p, return_sample=False, max_num_burn_in=None, max_num_iter=1100, min_num_iter=10, num_chains=10, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, eps=0.01, max_frac_sem=0.01, max_allowed_batch_correlation=None, beta_outlier_iqr_threshold=5, gauss_seidel=False, update_hyper_sigma=True, update_hyper_p=True, adjust_hyper_sigma_p=False, only_update_hyper=False, sigma_num_devs_to_top=2.0, p_noninf_inflate=1.0, num_p_pseudo=1, sparse_solution=False, sparse_frac_betas=None, betas_trace_out=None, betas_trace_gene_sets=None, beta_tildes=None, ses=None, V=None, X_orig=None, scale_factors=None, mean_shifts=None, is_dense_gene_set=None, ps=None, sigma2s=None, assume_independent=False, num_missing_gene_sets=None, debug_genes=None, debug_gene_sets=None, init_betas=None, init_postp=None):
 
         debug_gene_sets = None
@@ -17813,23 +13952,10 @@ class GeneSetData(object):
     #useful when want to conduct matrix calculations for which dense arrays are much faster, but don't have enough memory to cast all of X to dense
     #full_whiten (which multiplies by C^{-1} takes precedence over whiten, which multiplies by C^{1/2}, but whiten defaults to true
     #if mean_shifts/scale_factors are passed in, then shift/rescale the blocks. This is done *before* any whitening
-    def _get_X_blocks(self, whiten=True, full_whiten=False, get_missing=False, start_batch=0, mean_shifts=None, scale_factors=None):
-        X_orig = self.X_orig
-        if get_missing:
-            X_orig = self.X_orig_missing_gene_sets
-
-        for (X_b, begin, end, batch) in self._get_X_blocks_internal(X_orig, self.y_corr_cholesky, whiten=whiten, full_whiten=full_whiten, start_batch=start_batch, mean_shifts=mean_shifts, scale_factors=scale_factors):
-            yield (X_b, begin, end, batch)
-
     def _get_num_X_blocks(self, X_orig, batch_size=None):
         if batch_size is None:
             batch_size = self.batch_size
         return int(np.ceil(X_orig.shape[1] / batch_size))
-
-    def _get_X_size_mb(self, X_orig=None):
-        if X_orig is None:
-            X_orig = self.X_orig
-        return (self.X_orig.data.nbytes + self.X_orig.indptr.nbytes + self.X_orig.indices.nbytes) / 1024 / 1024
 
     def _get_X_blocks_internal(self, X_orig, y_corr_cholesky, whiten=True, full_whiten=False, start_batch=0, mean_shifts=None, scale_factors=None):
 
@@ -17870,13 +13996,6 @@ class GeneSetData(object):
 
                 yield (X_b, begin, end, batch)
 
-    def _get_fraction_non_missing(self):
-        if self.gene_sets_missing is not None and self.gene_sets is not None:
-            fraction_non_missing = float(len(self.gene_sets)) / float(len(self.gene_sets_missing) + len(self.gene_sets))        
-        else:
-            fraction_non_missing = 1
-        return fraction_non_missing
-    
     def _calc_X_shift_scale(self, X, y_corr_cholesky=None):
         if y_corr_cholesky is None:
             if sparse.issparse(X):
@@ -17974,24 +14093,6 @@ class GeneSetData(object):
             self.scale_is_for_whitened = True
         else:
             self.scale_is_for_whitened = False
-
-    def _get_V(self):
-        if self.X_orig is not None:
-            log("Calculating internal V", TRACE)
-            return self._calculate_V()
-        else:
-            return None
-
-    def _calculate_V(self, X_orig=None, y_corr_cholesky=None, mean_shifts=None, scale_factors=None):
-        if X_orig is None:
-            X_orig = self.X_orig
-        if mean_shifts is None:
-            mean_shifts = self.mean_shifts
-        if scale_factors is None:
-            scale_factors = self.scale_factors
-        if y_corr_cholesky is None:
-            y_corr_cholesky = self.y_corr_cholesky
-        return self._calculate_V_internal(X_orig, y_corr_cholesky, mean_shifts, scale_factors)
 
     def _calculate_V_internal(self, X_orig, y_corr_cholesky, mean_shifts, scale_factors, y_corr_sparse=None):
         log("Calculating V for X with dimensions %d x %d" % (X_orig.shape[0], X_orig.shape[1]), TRACE)
@@ -18928,147 +15029,6 @@ class GeneSetData(object):
         if self.p is not None:
             self.set_p(self.p)
 
-    def _unsubset_gene_sets(self, skip_V=False, skip_scale_factors=False):
-        if self.gene_sets_missing is None or self.X_orig_missing_gene_sets is None:
-            return(np.array([True] * len(self.gene_sets)))
-
-        log("Un-subsetting gene sets", TRACE)
-
-        #need to update the scale factor for sigma2
-        #sigma2 is always relative to just the non missing gene sets
-        fraction_non_missing = self._get_fraction_non_missing()
-
-        subset_mask = np.array([True] * len(self.gene_sets) + [False] * len(self.gene_sets_missing))
-
-        self.gene_sets += self.gene_sets_missing
-        self.gene_sets_missing = None
-        self.gene_set_to_ind = self._construct_map_to_ind(self.gene_sets)
-
-        #if self.sigma2 is not None:
-        #    old_sigma2 = self.sigma2
-        #    self.set_sigma(self.sigma2 * fraction_non_missing, self.sigma_power, sigma2_osc=self.sigma2_osc)
-        #    log("Changing sigma from %.4g to %.4g" % (old_sigma2, self.sigma2))
-        #if self.p is not None:
-        #    old_p = self.p
-        #    self.set_p(self.p * fraction_non_missing)
-        #    log("Changing p from %.4g to %.4g" % (old_p, self.p))
-
-        if self.beta_tildes_missing is not None:
-            self.beta_tildes = np.append(self.beta_tildes, self.beta_tildes_missing)
-            self.beta_tildes_missing = None
-        if self.p_values_missing is not None:
-            self.p_values = np.append(self.p_values, self.p_values_missing)
-            self.p_values_missing = None
-        if self.z_scores_missing is not None:
-            self.z_scores = np.append(self.z_scores, self.z_scores_missing)
-            self.z_scores_missing = None
-        if self.ses_missing is not None:
-            self.ses = np.append(self.ses, self.ses_missing)
-            self.ses_missing = None
-        if self.se_inflation_factors_missing is not None:
-            self.se_inflation_factors = np.append(self.se_inflation_factors, self.se_inflation_factors_missing)
-            self.se_inflation_factors_missing = None
-
-        if self.total_qc_metrics_missing is not None:
-            self.total_qc_metrics = np.vstack((self.total_qc_metrics, self.total_qc_metrics_missing))
-            self.total_qc_metrics_missing = None
-
-        if self.mean_qc_metrics_missing is not None:
-            self.mean_qc_metrics = np.append(self.mean_qc_metrics, self.mean_qc_metrics_missing)
-            self.mean_qc_metrics_missing = None
-
-        if self.beta_tildes_missing_orig is not None:
-            self.beta_tildes_orig = np.append(self.beta_tildes_orig, self.beta_tildes_missing_orig)
-            self.beta_tildes_missing_orig = None
-        if self.p_values_missing_orig is not None:
-            self.p_values_orig = np.append(self.p_values_orig, self.p_values_missing_orig)
-            self.p_values_missing_orig = None
-        if self.z_scores_missing_orig is not None:
-            self.z_scores_orig = np.append(self.z_scores_orig, self.z_scores_missing_orig)
-            self.z_scores_missing_orig = None
-        if self.ses_missing_orig is not None:
-            self.ses_orig = np.append(self.ses_orig, self.ses_missing_orig)
-            self.ses_missing_orig = None
-
-        if self.inf_betas_missing is not None:
-            self.inf_betas = np.append(self.inf_betas, self.inf_betas_missing)
-            self.inf_betas_missing = None
-
-        if self.betas_uncorrected_missing is not None:
-            self.betas_uncorrected = np.append(self.betas_uncorrected, self.betas_uncorrected_missing)
-            self.betas_uncorrected_missing = None
-        if self.betas_r_hat_missing is not None:
-            self.betas_r_hat = np.append(self.betas_r_hat, self.betas_r_hat_missing)
-            self.betas_r_hat_missing = None
-        if self.betas_mcse_missing is not None:
-            self.betas_mcse = np.append(self.betas_mcse, self.betas_mcse_missing)
-            self.betas_mcse_missing = None
-        if self.betas_uncorrected_r_hat_missing is not None:
-            self.betas_uncorrected_r_hat = np.append(self.betas_uncorrected_r_hat, self.betas_uncorrected_r_hat_missing)
-            self.betas_uncorrected_r_hat_missing = None
-        if self.betas_uncorrected_mcse_missing is not None:
-            self.betas_uncorrected_mcse = np.append(self.betas_uncorrected_mcse, self.betas_uncorrected_mcse_missing)
-            self.betas_uncorrected_mcse_missing = None
-
-        if self.betas_missing is not None:
-            self.betas = np.append(self.betas, self.betas_missing)
-            self.betas_missing = None
-        if self.non_inf_avg_cond_betas_missing is not None:
-            self.non_inf_avg_cond_betas = np.append(self.non_inf_avg_cond_betas, self.non_inf_avg_cond_betas_missing)
-            self.non_inf_avg_cond_betas_missing = None
-        if self.non_inf_avg_postps_missing is not None:
-            self.non_inf_avg_postps = np.append(self.non_inf_avg_postps, self.non_inf_avg_postps_missing)
-            self.non_inf_avg_postps_missing = None
-
-        if self.inf_betas_missing_orig is not None:
-            self.inf_betas_orig = np.append(self.inf_betas_orig, self.inf_betas_missing_orig)
-            self.inf_betas_missing_orig = None
-        if self.betas_missing_orig is not None:
-            self.betas_orig = np.append(self.betas_orig, self.betas_missing_orig)
-            self.betas_missing_orig = None
-        if self.betas_uncorrected_missing_orig is not None:
-            self.betas_uncorrected_orig = np.append(self.betas_uncorrected_orig, self.betas_uncorrected_missing_orig)
-            self.betas_uncorrected_missing_orig = None
-        if self.non_inf_avg_cond_betas_missing_orig is not None:
-            self.non_inf_avg_cond_betas_orig = np.append(self.non_inf_avg_cond_betas_orig, self.non_inf_avg_cond_betas_missing_orig)
-            self.non_inf_avg_cond_betas_missing_orig = None
-        if self.non_inf_avg_postps_missing_orig is not None:
-            self.non_inf_avg_postps_orig = np.append(self.non_inf_avg_postps_orig, self.non_inf_avg_postps_missing_orig)
-            self.non_inf_avg_postps_missing_orig = None
-
-        if self.X_orig_missing_gene_sets is not None:
-            self.X_orig = sparse.hstack((self.X_orig, self.X_orig_missing_gene_sets), format="csc")
-            self.X_orig_missing_gene_sets = None
-            self.mean_shifts = np.append(self.mean_shifts, self.mean_shifts_missing)
-            self.mean_shifts_missing = None
-            self.scale_factors = np.append(self.scale_factors, self.scale_factors_missing)
-            self.scale_factors_missing = None
-            self.is_dense_gene_set = np.append(self.is_dense_gene_set, self.is_dense_gene_set_missing)
-            self.is_dense_gene_set_missing = None
-            self.gene_set_batches = np.append(self.gene_set_batches, self.gene_set_batches_missing)
-            self.gene_set_batches_missing = None
-            self.gene_set_labels = np.append(self.gene_set_labels, self.gene_set_labels_missing)
-            self.gene_set_labels_missing = None
-
-
-            if self.ps is not None:
-                self.ps = np.append(self.ps, self.ps_missing)
-                self.ps_missing = None
-            if self.sigma2s is not None:
-                self.sigma2s = np.append(self.sigma2s, self.sigma2s_missing)
-                self.sigma2s_missing = None
-
-        self._set_X(self.X_orig, self.genes, self.gene_sets, skip_V=skip_V, skip_scale_factors=skip_scale_factors, skip_N=False)
-
-        if self.X_orig_missing_genes_missing_gene_sets is not None:
-            #if we've already removed genes, then we need to remove the gene sets from them
-            self.X_orig_missing_genes = sparse.hstack((self.X_orig_missing_genes, self.X_orig_missing_genes_missing_gene_sets), format="csc")
-            self.X_orig_missing_genes_missing_gene_sets = None
-
-        return(subset_mask)
-
-
-    #utility function to create a mapping from name to index in a list
     def _construct_map_to_ind(self, gene_sets):
         return dict([(gene_sets[i], i) for i in range(len(gene_sets))])
 
@@ -19092,72 +15052,13 @@ class GeneSetData(object):
             return matching_cols[0]
 
     # inverse_matrix calculations
-    def _invert_matrix(self,matrix_in):
-        inv_matrix=np.linalg.inv(matrix_in) 
-        return inv_matrix
-
-    def _invert_sym_matrix(self,matrix_in):
-        cho_factor = scipy.linalg.cho_factor(matrix_in)
-        return scipy.linalg.cho_solve(cho_factor, np.eye(matrix_in.shape[0]))
-
-    def _invert_matrix_old(self,matrix_in):
-        sparsity=(matrix_in.shape[0]*matrix_in.shape[1]-matrix_in.count_nonzero())/(matrix_in.shape[0]*matrix_in.shape[1])
-        log("Sparsity of matrix_in in invert_matrix %s" % sparsity, INFO)
-        if sparsity>0.65:
-            inv_matrix=np.linalg.inv(matrix_in.toarray()) # works efficiently for sparse matrix_in
-        else:
-            inv_matrix=sparse.linalg.inv(matrix_in) 
-        return inv_matrix
-
-
-##This function is for labelling clusters. Update it with your favorite LLM if desired
-def query_lmm(query, auth_key=None, lmm_model=None):
-
-    import requests
-
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer %s' % auth_key,
-    }
-
-    if lmm_model is None:
-        lmm_model = "gpt-4o-mini"
-
-    json_data = {
-        #'model': 'gpt-3.5-turbo',
-        'model': lmm_model,
-        'messages': [
-            {
-                'role': 'user',
-                'content': '%s' % query,
-            },
-        ],
-    }
-    try:
-        response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=json_data).json()
-        if "choices" in response and len(response["choices"]) > 0 and "message" in response["choices"][0] and "content" in response["choices"][0]["message"]:
-            return response["choices"][0]["message"]["content"]
-        else:
-            log("LMM response did not match the expected format; returning none. Response: %s" % response); 
-            return None
-    except Exception:
-        log("LMM call failed; returning None"); 
-        return None
-
 
 def _build_main_mode_state():
     return {
-        "run_huge": run_huge,
-        "run_beta_tilde": run_beta_tilde,
-        "run_beta": run_beta,
-        "run_priors": run_priors,
-        "run_naive_priors": run_naive_priors,
-        "run_gibbs": run_gibbs,
         "run_factor": run_factor,
         "run_phewas": run_phewas,
         "run_factor_phewas": options.factor_phewas_from_gene_phewas_stats_in is not None,
         "run_naive_factor": run_naive_factor,
-        "run_sim": run_sim,
         "use_phewas_for_factoring": use_phewas_for_factoring,
         "factor_gene_set_x_pheno": factor_gene_set_x_pheno,
         "expand_gene_sets": expand_gene_sets,
@@ -19360,283 +15261,11 @@ def _log_runtime_environment_if_requested(options):
     log("Options: %s" % options)
 
 
-def _default_for_gene_list_inputs(options):
-    options.ols = True
-    if options.positive_controls_all_in is None and not options.add_all_genes:
-        bail("Specified positive controls without --positive-controls-all-in; therefore using all genes in gene sets as negatives. This may result in inflated enrichments. If you really want to run this, specify --add-all-genes")
-
-
-def _configure_main_hyperparameters(g, options):
-    sigma2_cond = options.sigma2_cond
-
-    if sigma2_cond is not None:
-        # Map sigma_cond to internal units with the current scale factors.
-        g.set_sigma(options.sigma2_ext, options.sigma_power, convert_sigma_to_internal_units=False)
-        sigma2_cond = g.get_sigma2()
-        g.set_sigma(None, g.sigma_power)
-    elif options.sigma2_ext is not None:
-        g.set_sigma(options.sigma2_ext, options.sigma_power, convert_sigma_to_internal_units=True)
-        log("Setting sigma=%.4g (given external=%.4g) " % (g.get_sigma2(), g.get_sigma2(convert_sigma_to_external_units=True)))
-    elif options.sigma2 is not None:
-        g.set_sigma(options.sigma2, options.sigma_power, convert_sigma_to_internal_units=False)
-    elif options.top_gene_set_prior:
-        g.set_sigma(g.convert_prior_to_var(options.top_gene_set_prior, options.num_gene_sets_for_prior if options.num_gene_sets_for_prior is not None else len(g.gene_sets), options.frac_gene_sets_for_prior), options.sigma_power, convert_sigma_to_internal_units=True)
-        if options.frac_gene_sets_for_prior == 1:
-            # In this case sigma2_cond was specified conceptually, not total sigma2.
-            sigma2_cond = g.get_sigma2()
-            log("Setting sigma_cond=%.4g (external=%.4g) given top of %d gene sets prior of %.4g" % (g.get_sigma2(), g.get_sigma2(convert_sigma_to_external_units=True), options.num_gene_sets_for_prior, options.top_gene_set_prior))
-            g.set_sigma(None, g.sigma_power)
-        else:
-            log("Setting sigma=%.4g (external=%.4g) given top of %d gene sets prior of %.4g" % (g.get_sigma2(), g.get_sigma2(convert_sigma_to_external_units=True), options.num_gene_sets_for_prior, options.top_gene_set_prior))
-
-    if options.const_sigma:
-        options.sigma_power = 2
-
-    if options.update_hyper.lower() == "both":
-        options.update_hyper_p = True
-        options.update_hyper_sigma = True
-    elif options.update_hyper.lower() == "p":
-        options.update_hyper_p = True
-        options.update_hyper_sigma = False
-    elif options.update_hyper.lower() == "sigma2" or options.update_hyper.lower() == "sigma":
-        options.update_hyper_p = False
-        options.update_hyper_sigma = True
-    elif options.update_hyper.lower() == "none":
-        options.update_hyper_p = False
-        options.update_hyper_sigma = False
-    else:
-        bail("Invalid value for --update-hyper (both, p, sigma2, or none)")
-
-    return sigma2_cond
-
-
 def _initialize_main_mappings(g, options):
     if options.gene_map_in:
         g.read_gene_map(options.gene_map_in, options.gene_map_orig_gene_col, options.gene_map_orig_gene_col)
     if options.gene_loc_file:
         g.init_gene_locs(options.gene_loc_file)
-
-
-def _compute_extend_for_gene(mode_state, options):
-    return (
-        mode_state["run_factor"]
-        and mode_state["use_phewas_for_factoring"]
-        and options.anchor_genes is not None
-        and (
-            options.add_gene_sets_by_enrichment_p is not None
-            or options.add_gene_sets_by_naive is not None
-            or options.add_gene_sets_by_gibbs is not None
-        )
-    )
-
-
-def _load_main_y_inputs(g, options, mode_state, extend_for_gene):
-    Y_not_loaded = False
-
-    should_consider_y_read = (
-        (not mode_state["run_factor"] or not mode_state["use_phewas_for_factoring"] or extend_for_gene)
-        and (
-            (mode_state["run_factor"] and mode_state["expand_gene_sets"] and extend_for_gene)
-            or mode_state["run_huge"]
-            or mode_state["run_beta_tilde"]
-            or mode_state["run_beta"]
-            or mode_state["run_priors"]
-            or mode_state["run_naive_priors"]
-            or mode_state["run_gibbs"]
-            or mode_state["run_factor"]
-        )
-    )
-    if not should_consider_y_read:
-        return Y_not_loaded
-
-    if not extend_for_gene and options.gene_stats_in:
-        g.read_Y(gene_bfs_in=options.gene_stats_in,show_progress=not options.hide_progress, gene_bfs_id_col=options.gene_stats_id_col, gene_bfs_log_bf_col=options.gene_stats_log_bf_col, gene_bfs_combined_col=options.gene_stats_combined_col, gene_bfs_prob_col=options.gene_stats_prob_col, gene_bfs_prior_col=options.gene_stats_prior_col, gene_covs_in=options.gene_covs_in, hold_out_chrom=options.hold_out_chrom)
-    elif extend_for_gene or options.gwas_in or options.huge_statistics_in or options.exomes_in or options.positive_controls_in or options.positive_controls_list is not None or options.case_counts_in is not None:
-        if not mode_state["use_phewas_for_factoring"] and options.gwas_in is None and options.huge_statistics_in is None and options.exomes_in is None and options.case_counts_in is None:
-            _default_for_gene_list_inputs(options)
-        g.read_Y(gwas_in=options.gwas_in, huge_statistics_in=options.huge_statistics_in, huge_statistics_out=options.huge_statistics_out, show_progress=not options.hide_progress, gwas_chrom_col=options.gwas_chrom_col, gwas_pos_col=options.gwas_pos_col, gwas_p_col=options.gwas_p_col, gwas_beta_col=options.gwas_beta_col, gwas_se_col=options.gwas_se_col, gwas_n_col=options.gwas_n_col, gwas_n=options.gwas_n, gwas_units=options.gwas_units, gwas_freq_col=options.gwas_freq_col, gwas_filter_col=options.gwas_filter_col, gwas_filter_value=options.gwas_filter_value, gwas_locus_col=options.gwas_locus_col, gwas_ignore_p_threshold=options.gwas_ignore_p_threshold, gwas_low_p=options.gwas_low_p, gwas_high_p=options.gwas_high_p, gwas_low_p_posterior=options.gwas_low_p_posterior, gwas_high_p_posterior=options.gwas_high_p_posterior, detect_low_power=options.gwas_detect_low_power, detect_high_power=options.gwas_detect_high_power, detect_adjust_huge=options.gwas_detect_adjust_huge, learn_window=options.learn_window, closest_gene_prob=options.closest_gene_prob, max_closest_gene_prob=options.max_closest_gene_prob, scale_raw_closest_gene=options.scale_raw_closest_gene, cap_raw_closest_gene=options.cap_raw_closest_gene, cap_region_posterior=options.cap_region_posterior, scale_region_posterior=options.scale_region_posterior, phantom_region_posterior=options.phantom_region_posterior, allow_evidence_of_absence=options.allow_evidence_of_absence, correct_huge=options.correct_huge, gws_prob_true=options.gene_zs_gws_prob_true, max_closest_gene_dist=options.max_closest_gene_dist, signal_window_size=options.signal_window_size, signal_min_sep=options.signal_min_sep, signal_max_logp_ratio=options.signal_max_logp_ratio, credible_set_span=options.credible_set_span, min_n_ratio=options.min_n_ratio, max_clump_ld=options.max_clump_ld, exomes_in=options.exomes_in, exomes_gene_col=options.exomes_gene_col, exomes_p_col=options.exomes_p_col, exomes_beta_col=options.exomes_beta_col, exomes_se_col=options.exomes_se_col, exomes_n_col=options.exomes_n_col, exomes_n=options.exomes_n, exomes_units=options.exomes_units, exomes_low_p=options.exomes_low_p, exomes_high_p=options.exomes_high_p, exomes_low_p_posterior=options.exomes_low_p_posterior, exomes_high_p_posterior=options.exomes_high_p_posterior, positive_controls_in=options.positive_controls_in, positive_controls_id_col=options.positive_controls_id_col, positive_controls_prob_col=options.positive_controls_prob_col, positive_controls_default_prob=options.positive_controls_default_prob, positive_controls_has_header=options.positive_controls_has_header, positive_controls_list=options.positive_controls_list, positive_controls_all_in=options.positive_controls_all_in, positive_controls_all_id_col=options.positive_controls_all_id_col, positive_controls_all_has_header=options.positive_controls_all_has_header, case_counts_in=options.case_counts_in, case_counts_gene_col=options.case_counts_gene_col, case_counts_revel_col=options.case_counts_revel_col, case_counts_count_col=options.case_counts_count_col, case_counts_tot_col=options.case_counts_tot_col, case_counts_max_freq_col=options.case_counts_max_freq_col, min_revels=options.counts_min_revels, mean_rrs=options.counts_mean_rrs, max_case_freq=options.counts_max_case_freq, ctrl_counts_in=options.ctrl_counts_in, ctrl_counts_gene_col=options.ctrl_counts_gene_col, ctrl_counts_revel_col=options.ctrl_counts_revel_col, ctrl_counts_count_col=options.ctrl_counts_count_col, ctrl_counts_tot_col=options.ctrl_counts_tot_col, ctrl_counts_max_freq_col=options.ctrl_counts_max_freq_col, max_ctrl_freq=options.counts_max_ctrl_freq, syn_revel_threshold=options.counts_syn_revel, syn_fisher_p=options.counts_syn_fisher_p, nu=options.counts_nu, beta=options.counts_beta, gene_loc_file=options.gene_loc_file_huge if options.gene_loc_file_huge is not None else options.gene_loc_file, gene_covs_in=options.gene_covs_in, hold_out_chrom=options.hold_out_chrom, exons_loc_file=options.exons_loc_file_huge, min_var_posterior=options.min_var_posterior, s2g_in=options.s2g_in, s2g_chrom_col=options.s2g_chrom_col, s2g_pos_col=options.s2g_pos_col, s2g_gene_col=options.s2g_gene_col, s2g_prob_col=options.s2g_prob_col, s2g_normalize_values=options.s2g_normalize_values, credible_sets_in=options.credible_sets_in, credible_sets_id_col=options.credible_sets_id_col, credible_sets_chrom_col=options.credible_sets_chrom_col, credible_sets_pos_col=options.credible_sets_pos_col, credible_sets_ppa_col=options.credible_sets_ppa_col)
-    elif options.betas_uncorrected_from_phewas:
-        if not options.gene_phewas_bfs_in:
-            bail("Require --gene-phewas-bfs-in for --betas-from-phewas option")
-        g.read_gene_phewas_bfs(gene_phewas_bfs_in=options.gene_phewas_bfs_in,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, anchor_genes=options.anchor_genes, anchor_phenos=options.anchor_phenos, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, phewas_gene_to_X_gene_in=options.gene_phewas_id_to_X_id, min_value=options.min_gene_phewas_read_value, max_num_entries_at_once=options.max_read_entries_at_once)
-    else:
-        Y_not_loaded = True
-
-    return Y_not_loaded
-
-
-
-def _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded):
-    run_huge = mode_state["run_huge"]
-    run_beta_tilde = mode_state["run_beta_tilde"]
-    run_beta = mode_state["run_beta"]
-    run_priors = mode_state["run_priors"]
-    run_naive_priors = mode_state["run_naive_priors"]
-    run_gibbs = mode_state["run_gibbs"]
-    run_factor = mode_state["run_factor"]
-    run_naive_factor = mode_state["run_naive_factor"]
-    run_sim = mode_state["run_sim"]
-    use_phewas_for_factoring = mode_state["use_phewas_for_factoring"]
-    factor_gene_set_x_pheno = mode_state["factor_gene_set_x_pheno"]
-    current_workflow = mode_state.get("factor_workflow")
-    workflow_id = current_workflow.get("id") if isinstance(current_workflow, dict) else None
-
-    gene_set_ids = None
-    if run_factor:
-        # Read IDs first so read_X can skip gene sets outside the selected strategy inputs.
-        factor_uses_phewas_gene_set_ids = workflow_id in set(["F4", "F5", "F6", "F7", "F8"])
-        if factor_uses_phewas_gene_set_ids:
-            if options.gene_set_phewas_stats_in is None:
-                bail("Need --gene-set-phewas-stats-in")
-            gene_set_ids = g.read_gene_set_phewas_statistics(options.gene_set_phewas_stats_in, stats_id_col=options.gene_set_phewas_stats_id_col, stats_pheno_col=options.gene_set_phewas_stats_pheno_col, stats_beta_col=options.gene_set_phewas_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, return_only_ids=True, phenos_to_match=options.anchor_phenos, max_num_entries_at_once=options.max_read_entries_at_once)
-        elif options.gene_set_stats_in is not None and not use_phewas_for_factoring:
-            gene_set_ids = g.read_gene_set_statistics(options.gene_set_stats_in, stats_id_col=options.gene_set_stats_id_col, stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col, stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col, stats_p_col=options.gene_set_stats_p_col, stats_se_col=options.gene_set_stats_se_col, stats_beta_col=options.gene_set_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col, ignore_negative_exp_beta=options.ignore_negative_exp_beta, max_gene_set_p=options.max_gene_set_read_p, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, return_only_ids=True)
-
-        if gene_set_ids is not None:
-            log("Will read %d gene sets" % (len(gene_set_ids)), DEBUG)
-            
-
-    #read in the matrices
-    if options.X_in is not None or options.X_list is not None or options.Xd_in is not None or options.Xd_list is not None:
-        xin_to_p_noninf_ind = None
-        if options.p_noninf is not None:
-            #we need the order of these
-            p_noninf_ind = 0
-            xin_to_p_noninf_ind = {}
-            for i in range(len(sys.argv)):
-                arg = sys.argv[i]
-                if arg in ("--X-in", "--X-list", "--Xd-in", "--Xd-list"):
-                    if i + 1 < len(sys.argv):
-                        val = sys.argv[i + 1]
-                        if val in xin_to_p_noninf_ind:
-                            warn("You are passing the same file (%s) for two --X-in files; are you sure this is what you want to do?" % (val))
-                        xin_to_p_noninf_ind[val] = p_noninf_ind
-                        if len(options.p_noninf) > 1:
-                            p_noninf_ind += 1
-                    else:
-                        raise ValueError(f"Missing value after {arg}")
-            if len(options.p_noninf) > 1 and len(options.p_noninf) != p_noninf_ind:
-                bail("Error: if you pass in more than one --p-noninf, you need to have the same number of values as --X-* inputs")
-
-        filter_gene_set_p = options.filter_gene_set_p
-        force_reread = False
-        while True:
-            orig_sigma2 = g.sigma2
-
-            skip_betas = (run_huge or run_beta_tilde or run_factor) and (not run_beta and not run_priors and not run_naive_priors and not run_gibbs and (not run_factor or options.gene_set_stats_in is not None or use_phewas_for_factoring or Y_not_loaded))
-
-            genes_to_inc = None
-            if run_factor and use_phewas_for_factoring:
-                genes_to_inc = options.anchor_genes
-                options.max_num_gene_sets = None
-                
-            g.read_X(options.X_in, Xd_in=options.Xd_in, X_list=options.X_list, Xd_list=options.Xd_list, V_in=options.V_in, min_gene_set_size=options.min_gene_set_size, max_gene_set_size=options.max_gene_set_size, only_ids=gene_set_ids, only_inc_genes=genes_to_inc, fraction_inc_genes=options.add_gene_sets_by_fraction, add_all_genes=options.add_all_genes, prune_gene_sets=options.prune_gene_sets, weighted_prune_gene_sets=options.weighted_prune_gene_sets, prune_deterministically=options.prune_deterministically, x_sparsify=options.x_sparsify, add_ext=options.add_ext, add_top=options.add_top, add_bottom=options.add_bottom, filter_negative=options.filter_negative, threshold_weights=options.threshold_weights, cap_weights=options.cap_weights, permute_gene_sets=options.permute_gene_sets, max_gene_set_p=options.max_gene_set_read_p, filter_gene_set_p=filter_gene_set_p, filter_using_phewas=options.betas_uncorrected_from_phewas, increase_filter_gene_set_p=options.increase_filter_gene_set_p, max_num_gene_sets_initial=options.max_num_gene_sets_initial, max_num_gene_sets=options.max_num_gene_sets, max_num_gene_sets_hyper=options.max_num_gene_sets_hyper, skip_betas=skip_betas, run_logistic=not options.linear, max_for_linear=options.max_for_linear, filter_gene_set_metric_z=options.filter_gene_set_metric_z, initial_p=options.p_noninf, xin_to_p_noninf_ind=xin_to_p_noninf_ind, initial_sigma2=g.sigma2, initial_sigma2_cond=sigma2_cond, sigma_power=options.sigma_power, sigma_soft_threshold_95=options.sigma_soft_threshold_95, sigma_soft_threshold_5=options.sigma_soft_threshold_5, run_gls=False, run_corrected_ols=not options.ols, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_loc_file=options.gene_loc_file, gene_cor_file=options.gene_cor_file, gene_cor_file_gene_col=options.gene_cor_file_gene_col, gene_cor_file_cor_start_col=options.gene_cor_file_cor_start_col, update_hyper_p=options.update_hyper_p, update_hyper_sigma=options.update_hyper_sigma, batch_all_for_hyper=options.batch_all_for_hyper, first_for_hyper=options.first_for_hyper, first_max_p_for_hyper=options.first_max_p_for_hyper, first_for_sigma_cond=options.first_for_sigma_cond, sigma_num_devs_to_top=options.sigma_num_devs_to_top, p_noninf_inflate=options.p_noninf_inflate, batch_separator=options.batch_separator, ignore_genes=set(options.ignore_genes), file_separator=options.file_separator, max_num_burn_in=options.max_num_burn_in, max_num_iter_betas=options.max_num_iter_betas, min_num_iter_betas=options.min_num_iter_betas, num_chains_betas=options.num_chains_betas, r_threshold_burn_in_betas=options.r_threshold_burn_in_betas, use_max_r_for_convergence_betas=options.use_max_r_for_convergence_betas, max_frac_sem_betas=options.max_frac_sem_betas, max_allowed_batch_correlation=options.max_allowed_batch_correlation, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, betas_trace_out=options.betas_trace_out, show_progress=not options.hide_progress, skip_V=(options.max_gene_set_read_p is not None), force_reread=force_reread, max_num_entries_at_once=options.max_read_entries_at_once)
-
-            if gene_set_ids is not None:
-                break
-            if options.min_num_gene_sets is None or filter_gene_set_p is None or filter_gene_set_p >= 1 or g.gene_sets is None or len(g.gene_sets) >= options.min_num_gene_sets:
-                break
-            if filter_gene_set_p < 1:
-                fraction_to_increase = float(options.min_num_gene_sets) / (len(g.gene_sets) + 1)
-                if fraction_to_increase > 1:
-                    #add in a fudge factor
-                    filter_gene_set_p *= fraction_to_increase * 1.2
-                    if filter_gene_set_p > 1:
-                        filter_gene_set_p = 1
-                    log("Only read in %d gene sets; scaled --filter-gene-set-p to %.3g and re-reading gene sets" % (len(g.gene_sets), filter_gene_set_p))
-                    force_reread = True
-                    #reset sigma
-                    g.set_sigma(orig_sigma2, g.sigma_power)
-                else:
-                    break
-            else:
-                break
-    else:
-        #set p
-        if options.p_noninf is not None:
-            if len(options.p_noninf) == 1:
-                g.set_p(options.p_noninf[0])
-            else:
-                bail("Multiple --p-noninf is not supported without --X-in inputs")
-
-    if not g.has_gene_sets():
-        log("No gene sets survived the input filters; stopping")
-        sys.exit(0)
-
-    assert(g.p is not None)
-
-    if Y_not_loaded and options.const_gene_Y:
-        g.set_const_Y(options.const_gene_Y)
-
-
-    if options.X_out:
-        g.write_X(options.X_out)
-    if options.Xd_out:
-        g.write_Xd(options.Xd_out)
-    if options.V_out:
-        g.write_V(options.V_out)
-
-    if run_sim:
-        g.run_sim(sigma2=g.sigma2, p=g.p, sigma_power=g.sigma_power, log_bf_noise_sigma_mult=options.sim_log_bf_noise_sigma_mult, treat_sigma2_as_sigma2_cond=False, only_positive=options.sim_only_positive)
-
-    run_gibbs_for_factor = False
-    run_beta_for_factor = False
-
-    if run_factor is not None and options.const_gene_set_beta is not None:
-        g.beta_tildes = np.full(len(g.gene_sets), options.const_gene_set_beta)
-    elif options.gene_set_stats_in is not None and not use_phewas_for_factoring:
-        g.read_gene_set_statistics(options.gene_set_stats_in, stats_id_col=options.gene_set_stats_id_col, stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col, stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col, stats_p_col=options.gene_set_stats_p_col, stats_se_col=options.gene_set_stats_se_col, stats_beta_col=options.gene_set_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col, ignore_negative_exp_beta=options.ignore_negative_exp_beta, max_gene_set_p=options.max_gene_set_read_p, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected)
-    elif run_beta_tilde or run_beta or run_priors or run_naive_priors or run_gibbs or (run_factor and not use_phewas_for_factoring and (options.anchor_gene_set is not None or not factor_gene_set_x_pheno)) or (run_factor and (options.add_gene_sets_by_naive or options.add_gene_sets_by_gibbs)) or run_sim:
-        if run_factor:
-            run_beta_for_factor = True
-            if not run_naive_factor:
-                run_gibbs_for_factor = True
-
-        g.calculate_gene_set_statistics(max_gene_set_p=options.filter_gene_set_p if not options.betas_uncorrected_from_phewas else 1, run_gls=False, run_logistic=not options.linear, max_for_linear=options.max_for_linear, run_corrected_ols=not options.ols, use_sampling_for_betas=options.use_sampling_for_betas, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_loc_file=options.gene_loc_file, gene_cor_file=options.gene_cor_file, gene_cor_file_gene_col=options.gene_cor_file_gene_col, gene_cor_file_cor_start_col=options.gene_cor_file_cor_start_col)
-
-        if options.betas_uncorrected_from_phewas:
-            g.calculate_gene_set_statistics(max_gene_set_p=1, run_gls=False, run_logistic=not options.linear, max_for_linear=options.max_for_linear, run_corrected_ols=not options.ols, use_sampling_for_betas=options.use_sampling_for_betas, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_loc_file=options.gene_loc_file, gene_cor_file=options.gene_cor_file, gene_cor_file_gene_col=options.gene_cor_file_gene_col, gene_cor_file_cor_start_col=options.gene_cor_file_cor_start_col, Y=g.gene_pheno_Y, run_using_phewas=True)
-
-    factor_input_state = {
-        "anchor_gene_mask": None,
-        "anchor_pheno_mask": None,
-    }
-    if run_factor:
-        factor_input_state = _load_factor_phewas_inputs(g, options)
-
-    if (run_beta or run_priors or run_naive_priors or run_gibbs or run_beta_for_factor) and g.sigma2 is None:
-        bail("Sigma2 was not initialized; provide --sigma2 explicitly")
-
-    if options.cross_val:
-        g.run_cross_val(options.cross_val_num_explore_each_direction, folds=options.cross_val_folds, cross_val_max_num_tries=options.cross_val_max_num_tries, p=g.p, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, run_logistic=not options.linear, max_for_linear=options.max_for_linear, run_corrected_ols=not options.ols, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas)
-
-    #gene set betas
-    if run_factor is not None and options.const_gene_set_beta is not None:
-        g.betas = np.full(len(g.gene_sets), options.const_gene_set_beta)
-        g.betas_uncorrected = np.full(len(g.gene_sets), options.const_gene_set_beta)
-    elif (not run_factor or not use_phewas_for_factoring) and options.gene_set_betas_in:
-        g.read_betas(options.gene_set_betas_in)
-    elif run_beta or run_priors or run_naive_priors or run_gibbs or run_beta_for_factor:
-        #if False:
-        #    g.calculate_inf_betas(update_hyper_sigma=options.update_hyper_sigma)
-        #update hyper was done above while while reading x
-        g.calculate_non_inf_betas(g.p, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, pre_filter_batch_size=options.pre_filter_batch_size, pre_filter_small_batch_size=options.pre_filter_small_batch_size, betas_trace_out=options.betas_trace_out)
-
-        if options.betas_uncorrected_from_phewas:
-            g.calculate_non_inf_betas(g.p, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel_betas, update_hyper_sigma=False, update_hyper_p=False, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, pre_filter_batch_size=options.pre_filter_batch_size, pre_filter_small_batch_size=options.pre_filter_small_batch_size, betas_trace_out=options.betas_trace_out, run_betas_using_phewas=options.betas_from_phewas, run_uncorrected_using_phewas=True)
-
-    #priors
-    if run_priors:
-        g.calculate_priors(max_gene_set_p=options.filter_gene_set_p, num_gene_batches=options.priors_num_gene_batches, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_loc_file=options.gene_loc_file, gene_cor_file=options.gene_cor_file, gene_cor_file_gene_col=options.gene_cor_file_gene_col, gene_cor_file_cor_start_col=options.gene_cor_file_cor_start_col, p_noninf=g.p, run_logistic=not options.linear, max_for_linear=options.max_for_linear, adjust_priors=options.adjust_priors, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas)
-    elif run_naive_priors or (run_naive_factor and not use_phewas_for_factoring):
-        g.calculate_naive_priors(adjust_priors=options.adjust_priors)
-
-    if run_factor is not None and options.const_gene_log_bf is not None:
-        g.Y = np.full(len(g.genes), options.const_gene_log_bf)
-        g.combined_prior_Ys = np.full(len(g.genes), options.const_gene_log_bf)
-    elif run_gibbs or run_gibbs_for_factor:
-        g.run_gibbs(min_num_iter=options.min_num_iter, max_num_iter=options.max_num_iter, total_num_iter=options.total_num_iter_gibbs, max_num_restarts=options.max_num_restarts, num_chains=options.num_chains, num_mad=options.num_mad, r_threshold_burn_in=options.r_threshold_burn_in, use_max_r_for_convergence=options.use_max_r_for_convergence, increase_hyper_if_betas_below=options.increase_hyper_if_betas_below, update_huge_scores=options.update_huge_scores, top_gene_prior=options.top_gene_prior, min_num_burn_in=options.min_num_burn_in, max_num_burn_in=options.max_num_burn_in, min_num_post_burn_in=options.min_num_post_burn_in, max_num_post_burn_in=options.max_num_post_burn_in, max_num_iter_betas=options.max_num_iter_betas, min_num_iter_betas=options.min_num_iter_betas, num_chains_betas=options.num_chains_betas, r_threshold_burn_in_betas=options.r_threshold_burn_in_betas, use_max_r_for_convergence_betas=options.use_max_r_for_convergence_betas, max_frac_sem_betas=options.max_frac_sem_betas, use_mean_betas=not options.use_sampled_betas_in_gibbs, warm_start=options.warm_start, burn_in_rhat_quantile=options.burn_in_rhat_quantile, burn_in_patience=options.burn_in_patience, burn_in_stall_window=options.burn_in_stall_window, burn_in_stall_delta=options.burn_in_stall_delta, stop_mcse_quantile=options.stop_mcse_quantile, stop_patience=options.stop_patience, stop_top_gene_k=options.stop_top_gene_k, stop_min_gene_d=options.stop_min_gene_d, max_abs_mcse_d=options.max_abs_mcse_d, max_rel_mcse_beta=options.max_rel_mcse_beta, active_beta_top_k=options.active_beta_top_k, active_beta_min_abs=options.active_beta_min_abs, beta_rel_mcse_denom_floor=options.beta_rel_mcse_denom_floor, stall_window=options.stall_window, stall_min_burn_in=options.stall_min_burn_in, stall_min_post_burn_in=options.stall_min_post_burn_in, stall_delta_rhat=options.stall_delta_rhat, stall_delta_mcse=options.stall_delta_mcse, stall_recent_window=options.stall_recent_window, stall_recent_eps=options.stall_recent_eps, stopping_preset_name=options.gibbs_stopping_preset, diag_every=options.diag_every, sparse_frac_gibbs=options.sparse_frac_gibbs, sparse_max_gibbs=options.sparse_max_gibbs, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, pre_filter_batch_size=options.pre_filter_batch_size, pre_filter_small_batch_size=options.pre_filter_small_batch_size, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel, gauss_seidel_betas=options.gauss_seidel_betas, num_batches_parallel=options.gibbs_num_batches_parallel, max_mb_X_h=options.gibbs_max_mb_X_h, initial_linear_filter=options.initial_linear_filter, adjust_priors=options.adjust_priors, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_set_stats_trace_out=options.gene_set_stats_trace_out, gene_stats_trace_out=options.gene_stats_trace_out, betas_trace_out=options.betas_trace_out)
-    return factor_input_state
 
 
 def _derive_factor_anchor_masks(g, options):
@@ -19754,7 +15383,7 @@ def _run_main_factor_stage(g, options, mode_state, factor_input_state):
     else:
         gene_or_pheno_filter_value = options.gene_filter_value
 
-    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state["anchor_pheno_mask"], anchor_gene_mask=factor_input_state["anchor_gene_mask"], anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state["anchor_pheno_mask"], anchor_gene_mask=factor_input_state["anchor_gene_mask"], anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, lmm_provider=options.lmm_provider, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
 
 
 def _write_main_factor_outputs(g, options):
@@ -19794,16 +15423,17 @@ def _run_main_factor_phewas_stage(g, options):
 def _should_run_main_factor_phewas_stage(mode_state):
     return bool(mode_state["run_factor"] and mode_state["run_factor_phewas"])
 
+GeneSetData = EagglState
+
+
 def main():
 
     mode_state = _build_main_mode_state()
     _enforce_factor_only_input_boundary(options, mode_state)
     _log_runtime_environment_if_requested(options)
 
-    g = GeneSetData(background_prior=options.background_prior, batch_size=options.batch_size)
-    sigma2_cond = _configure_main_hyperparameters(g, options)
+    g = EagglState(background_prior=options.background_prior, batch_size=options.batch_size)
     _initialize_main_mappings(g, options)
-    _ = sigma2_cond
     factor_input_state = _run_main_factor_only_pipeline(g, options, mode_state)
 
     _write_main_primary_outputs(g, options)
