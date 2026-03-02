@@ -11666,6 +11666,10 @@ class GeneSetData(object):
             anchor_pheno_mask = None
             self._record_params({"anchor": "gene set"})
 
+        # Record the effective anchor masks after option precedence is resolved.
+        self.anchor_pheno_mask = np.copy(anchor_pheno_mask) if anchor_pheno_mask is not None else None
+        self.anchor_gene_mask = np.copy(anchor_gene_mask) if anchor_gene_mask is not None else None
+
         #ensure at most one anchor mask, and initialize the matrix mask accordingly
         #remember that single pheno anchoring mode is implicit and doesn't have the anchor mask defined
         num_users = 1
