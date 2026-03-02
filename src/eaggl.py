@@ -1246,26 +1246,12 @@ run_phewas = False
 
 run_naive_factor = False
 run_sim = False
-pops_defaults = False
 use_phewas_for_factoring = False
 factor_gene_set_x_pheno = False
 expand_gene_sets = False
 factor_workflow = None
 
-
-if mode == "huge" or mode == "huge_calc":
-    run_huge = True
-elif mode == "beta_tildes" or mode == "beta_tilde":
-    run_beta_tilde = True
-elif mode == "betas" or mode == "beta":
-    run_beta = True
-elif mode == "priors" or mode == "prior":
-    run_priors = True
-elif mode == "naive_priors" or mode == "naive_prior":
-    run_naive_priors = True
-elif mode == "gibbs" or mode == "em":
-    run_gibbs = True
-elif mode == "factor" or mode == "naive_factor": #run factoring, phewas factoring, or pheno factoring
+if mode == "factor" or mode == "naive_factor": #run factoring, phewas factoring, or pheno factoring
     run_factor = True
     if options.add_gene_sets_by_naive is not None:
         run_naive_factor = True
@@ -1284,76 +1270,45 @@ elif mode == "factor" or mode == "naive_factor": #run factoring, phewas factorin
     else:
         log("Running factoring type: %s [workflow=%s]" % (factor_type, factor_workflow["id"]))
         _warn_for_factor_workflow_inputs(options, factor_workflow)
-
-elif mode == "sim" or mode == "simulate":
-    run_sim = True
-elif mode == "pops":
-    pops_defaults = True
-    run_priors = True
-elif mode == "naive_pops":
-    pops_defaults = True
-    run_naive_priors = True
 else:
     bail("Unrecognized mode %s" % mode)
 
 if options.run_phewas_from_gene_phewas_stats_in is not None:
     run_phewas = True
 
-#set defaults
+#set defaults (EAGGL supports only factor/naive_factor modes)
+options.correct_betas_mean = options.correct_betas_mean if options.correct_betas_mean is not None else True
+options.adjust_priors = options.adjust_priors if options.adjust_priors is not None else True
+options.p_noninf = options.p_noninf if options.p_noninf is not None else [0.001]
+options.sigma_power = options.sigma_power if options.sigma_power is not None else -2
+options.update_hyper = options.update_hyper if options.update_hyper is not None else "p"
+options.filter_negative = options.filter_negative if options.filter_negative is not None else True
+if options.prune_gene_sets is None:
+    if run_factor and factor_gene_set_x_pheno:
+        options.prune_gene_sets = 0.5
+    else:
+        options.prune_gene_sets = 0.8
 
-if mode == "pops" or mode == "naive_pops":
+if options.weighted_prune_gene_sets is None:
+    if run_factor and factor_gene_set_x_pheno:
+        options.weighted_prune_gene_sets = 0.5
+    else:
+        options.weighted_prune_gene_sets = 0.8
 
-    options.correct_betas_mean = options.correct_betas_mean if options.correct_betas_mean is not None else False
-    options.adjust_priors = options.adjust_priors if options.adjust_priors is not None else False
-    options.p_noninf = options.p_noninf if options.p_noninf is not None else [1]
-    options.sigma_power = options.sigma_power if options.sigma_power is not None else 2
-    options.update_hyper = options.update_hyper if options.update_hyper is not None else "none"
-    options.filter_negative = options.filter_negative if options.filter_negative is not None else False
-    options.prune_gene_sets = options.prune_gene_sets if options.prune_gene_sets is not None else 1.1
-    options.weighted_prune_gene_sets = options.weighted_prune_gene_sets if options.weighted_prune_gene_sets is not None else 1.1
-    options.top_gene_set_prior = options.top_gene_set_prior if options.top_gene_set_prior is not None else 0.1
-    options.num_gene_sets_for_prior = options.num_gene_sets_for_prior if options.num_gene_sets_for_prior is not None else 15000
-    options.filter_gene_set_p = options.filter_gene_set_p if options.filter_gene_set_p is not None else 0.05
-    options.linear = options.linear if options.linear is not None else True
-    options.max_for_linear = options.max_for_linear if options.max_for_linear is not None else 1
-    options.min_gene_set_size = options.min_gene_set_size if options.min_gene_set_size is not None else 1
-    options.cross_val = options.cross_val if options.cross_val is not None else True
-    options.sparse_frac_betas = options.sparse_frac_betas if options.sparse_frac_betas is not None else 0
-    options.sparse_solution = options.sparse_solution if options.sparse_solution is not None else False
+options.top_gene_set_prior = options.top_gene_set_prior if options.top_gene_set_prior is not None else 0.8
+options.num_gene_sets_for_prior = options.num_gene_sets_for_prior if options.num_gene_sets_for_prior is not None else 50
+options.filter_gene_set_p = options.filter_gene_set_p if options.filter_gene_set_p is not None else 0.01
+options.linear = options.linear if options.linear is not None else False
+options.max_for_linear = options.max_for_linear if options.max_for_linear is not None else 0.95
+options.min_gene_set_size = options.min_gene_set_size if options.min_gene_set_size is not None else 10
 
-else:
-    options.correct_betas_mean = options.correct_betas_mean if options.correct_betas_mean is not None else True
-    options.adjust_priors = options.adjust_priors if options.adjust_priors is not None else True
-    options.p_noninf = options.p_noninf if options.p_noninf is not None else [0.001]
-    options.sigma_power = options.sigma_power if options.sigma_power is not None else -2
-    options.update_hyper = options.update_hyper if options.update_hyper is not None else "p"
-    options.filter_negative = options.filter_negative if options.filter_negative is not None else True
-    if options.prune_gene_sets is None:
-        if run_factor and factor_gene_set_x_pheno:
-            options.prune_gene_sets = 0.5
-        else:
-            options.prune_gene_sets = 0.8
+if run_factor and factor_gene_set_x_pheno is not None:
+    if options.add_gene_sets_by_enrichment_p is not None:
+        options.filter_gene_set_p = options.add_gene_sets_by_enrichment_p
 
-    if options.weighted_prune_gene_sets is None:
-        if run_factor and factor_gene_set_x_pheno:
-            options.weighted_prune_gene_sets = 0.5
-        else:
-            options.weighted_prune_gene_sets = 0.8
-
-    options.top_gene_set_prior = options.top_gene_set_prior if options.top_gene_set_prior is not None else 0.8
-    options.num_gene_sets_for_prior = options.num_gene_sets_for_prior if options.num_gene_sets_for_prior is not None else 50
-    options.filter_gene_set_p = options.filter_gene_set_p if options.filter_gene_set_p is not None else 0.01
-    options.linear = options.linear if options.linear is not None else False
-    options.max_for_linear = options.max_for_linear if options.max_for_linear is not None else 0.95
-    options.min_gene_set_size = options.min_gene_set_size if options.min_gene_set_size is not None else 10
-
-    if run_factor and factor_gene_set_x_pheno is not None:
-        if options.add_gene_sets_by_enrichment_p is not None:
-            options.filter_gene_set_p = options.add_gene_sets_by_enrichment_p
-
-    options.cross_val = options.cross_val if options.cross_val is not None else False
-    options.sparse_frac_betas = options.sparse_frac_betas if options.sparse_frac_betas is not None else 0.001
-    options.sparse_solution = options.sparse_solution if options.sparse_solution is not None else True
+options.cross_val = options.cross_val if options.cross_val is not None else False
+options.sparse_frac_betas = options.sparse_frac_betas if options.sparse_frac_betas is not None else 0.001
+options.sparse_solution = options.sparse_solution if options.sparse_solution is not None else True
 
 gibbs_stopping_presets = {
     "lenient": {
