@@ -31,8 +31,8 @@ import random
 try:
     from .pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
-        coerce_config_value as pegs_coerce_config_value,
         configure_random_seed as pegs_configure_random_seed,
+        apply_config_option_overrides as pegs_apply_config_option_overrides,
         format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -44,8 +44,8 @@ try:
 except ImportError:
     from pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
-        coerce_config_value as pegs_coerce_config_value,
         configure_random_seed as pegs_configure_random_seed,
+        apply_config_option_overrides as pegs_apply_config_option_overrides,
         format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -441,9 +441,6 @@ def _is_path_like_dest(_dest):
 def _resolve_config_path_value(_value, _config_dir):
     return pegs_resolve_config_path_value(_value, _config_dir)
 
-def _coerce_config_value(_opt, _value):
-    return pegs_coerce_config_value(_opt, _value, bail_fn=bail)
-
 def _early_warn(_message):
     sys.stderr.write("Warning: %s\n" % _message)
     sys.stderr.flush()
@@ -472,58 +469,21 @@ def _apply_config_overrides(_options, _args, _parser, _argv):
         config_options.pop("mode", None)
         config_options.pop("include", None)
 
-    dest_to_option = {}
-    long_key_to_dest = {}
-    for opt in _iter_parser_options(_parser):
-        dest_to_option[opt.dest] = opt
-        for long_opt in opt._long_opts:
-            key = long_opt.lstrip("-")
-            long_key_to_dest[key] = opt.dest
-            long_key_to_dest[key.replace("-", "_")] = opt.dest
-
-    for raw_key, raw_value in config_options.items():
-        if raw_key in ("mode", "options", "include"):
-            continue
-        if isinstance(raw_key, str):
-            normalized_config_key = raw_key
-            if normalized_config_key.startswith("--"):
-                normalized_config_key = normalized_config_key[2:]
-            normalized_config_key = normalized_config_key.replace("-", "_")
-            if normalized_config_key in REMOVED_OPTION_REPLACEMENTS:
-                replacement = REMOVED_OPTION_REPLACEMENTS[normalized_config_key]
-                bail(pegs_format_removed_option_message(raw_key, replacement, context="config", config_path=config_path))
-        key = raw_key
-        if isinstance(key, str) and key.startswith("--"):
-            key = key[2:]
-        key_norm = key.replace("-", "_") if isinstance(key, str) else key
-
-        dest = None
-        if key in dest_to_option:
-            dest = key
-        elif key_norm in dest_to_option:
-            dest = key_norm
-        elif key in long_key_to_dest:
-            dest = long_key_to_dest[key]
-        elif key_norm in long_key_to_dest:
-            dest = long_key_to_dest[key_norm]
-
-        if dest is None:
-            _early_warn("Ignoring unknown config key '%s' in %s" % (raw_key, config_path))
-            continue
-
-        if dest in cli_specified_dests:
-            continue
-
-        opt = dest_to_option[dest]
-        coerced_value = _coerce_config_value(opt, raw_value)
-
-        if _is_path_like_dest(dest):
-            if isinstance(coerced_value, list):
-                coerced_value = [_resolve_config_path_value(v, config_dir) if isinstance(v, str) else v for v in coerced_value]
-            elif isinstance(coerced_value, str):
-                coerced_value = _resolve_config_path_value(coerced_value, config_dir)
-
-        setattr(_options, dest, coerced_value)
+    pegs_apply_config_option_overrides(
+        _options,
+        _parser,
+        config_options,
+        config_path,
+        config_dir,
+        cli_specified_dests,
+        resolve_path_fn=_resolve_config_path_value,
+        is_path_like_dest_fn=_is_path_like_dest,
+        early_warn_fn=_early_warn,
+        bail_fn=bail,
+        removed_option_replacements=REMOVED_OPTION_REPLACEMENTS,
+        format_removed_option_message_fn=pegs_format_removed_option_message,
+        config_specified_dests=None,
+    )
 
     return _options, _args, config_mode
 
