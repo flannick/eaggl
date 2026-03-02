@@ -15,3 +15,8 @@ From this repo:
 ```bash
 ../../.venv/bin/python src/eaggl.py factor --help
 ```
+
+## Workflow docs
+
+1. `docs/WORKFLOWS.md`: required inputs and runnable commands for all 9 factor workflows (`F1..F9`).
+2. `docs/INTEROP.md`: PIGEAN -> EAGGL handoff via `--eaggl-out` / `--eaggl-in`, plus separate-file fallback.
