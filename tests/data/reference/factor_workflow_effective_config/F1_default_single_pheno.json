@@ -4,9 +4,14 @@
     "error": null,
     "expand_gene_sets": false,
     "factor_gene_set_x_pheno": false,
+    "has_gene_phewas": false,
+    "has_gene_set_phewas": false,
     "id": "F1",
     "label": "single phenotype anchoring (to None) using default statistics",
-    "use_phewas_for_factoring": false
+    "missing_required_inputs": [],
+    "required_inputs": [],
+    "use_phewas_for_factoring": false,
+    "warn_ignored_y_inputs_mode": null
   },
   "mode": "factor",
   "options": {

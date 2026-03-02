@@ -4,9 +4,17 @@
     "error": null,
     "expand_gene_sets": true,
     "factor_gene_set_x_pheno": true,
+    "has_gene_phewas": true,
+    "has_gene_set_phewas": true,
     "id": "F7",
-    "label": "multiple gene anchoring (to {'GCK', 'INS'})",
-    "use_phewas_for_factoring": true
+    "label": "multiple gene anchoring (to {'INS', 'GCK'})",
+    "missing_required_inputs": [],
+    "required_inputs": [
+      "--gene-set-phewas-stats-in",
+      "--gene-phewas-stats-in"
+    ],
+    "use_phewas_for_factoring": true,
+    "warn_ignored_y_inputs_mode": "anchor_genes"
   },
   "mode": "factor",
   "options": {
