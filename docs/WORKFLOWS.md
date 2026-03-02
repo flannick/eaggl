@@ -37,8 +37,8 @@ $PYTHON src/eaggl.py factor --print-effective-config [workflow flags ...]
 Core matrix/stat inputs (direct mode):
 
 1. `--X-in` or `--X-list`
-2. `--gene-stats-in` (or raw evidence path that computes equivalent values)
-3. `--gene-set-stats-in` (or raw evidence path that computes equivalent values)
+2. `--gene-stats-in`
+3. `--gene-set-stats-in`
 
 PheWAS matrix inputs (for phenotype/gene anchor workflows):
 
@@ -47,7 +47,7 @@ PheWAS matrix inputs (for phenotype/gene anchor workflows):
 
 Bundle mode:
 
-1. `--eaggl-in <bundle.tar.gz>` can provide defaults for core inputs
+1. `--eaggl-bundle-in <bundle.tar.gz>` can provide defaults for core inputs
 2. explicit CLI flags always override bundle defaults
 
 ## Workflow Matrix

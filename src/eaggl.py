@@ -224,7 +224,7 @@ parser.add_option("","--gene-stats-log-bf-col",default=None,dest="gene_stats_log
 parser.add_option("","--gene-stats-combined-col",default=None,dest="gene_stats_combined_col")
 parser.add_option("","--gene-stats-prior-col",default=None,dest="gene_stats_prior_col")
 parser.add_option("","--gene-stats-prob-col",default=None,dest="gene_stats_prob_col")
-parser.add_option("","--eaggl-in",default=None) #read bundled PIGEAN outputs and use as default EAGGL inputs
+parser.add_option("","--eaggl-bundle-in",default=None) #read bundled PIGEAN outputs and use as default EAGGL inputs
 parser.add_option("","--const-gene-log-bf",default=None,type=float)
 
 #locations of genes
@@ -1079,7 +1079,7 @@ def _safe_extract_tar_to_temp(bundle_path):
             for member in members:
                 member_name = member.name
                 if os.path.isabs(member_name) or ".." in member_name.replace("\\", "/").split("/"):
-                    bail("Refusing to read suspicious path in --eaggl-in bundle: %s" % member_name)
+                    bail("Refusing to read suspicious path in --eaggl-bundle-in bundle: %s" % member_name)
             tar_fh.extractall(tmp_dir)
     except Exception:
         import shutil
@@ -1091,23 +1091,23 @@ def _safe_extract_tar_to_temp(bundle_path):
 
 def _load_eaggl_bundle_inputs(bundle_path):
     if not os.path.exists(bundle_path):
-        bail("Could not find --eaggl-in bundle %s" % bundle_path)
+        bail("Could not find --eaggl-bundle-in bundle %s" % bundle_path)
 
     extract_dir = _safe_extract_tar_to_temp(bundle_path)
     manifest_path = os.path.join(extract_dir, "manifest.json")
     if not os.path.exists(manifest_path):
-        bail("--eaggl-in bundle is missing manifest.json: %s" % bundle_path)
+        bail("--eaggl-bundle-in bundle is missing manifest.json: %s" % bundle_path)
 
     with open(manifest_path) as in_fh:
         manifest = json.load(in_fh)
     if not isinstance(manifest, dict):
-        bail("--eaggl-in manifest must be a JSON object: %s" % bundle_path)
+        bail("--eaggl-bundle-in manifest must be a JSON object: %s" % bundle_path)
     if manifest.get("schema") != _EAGGL_BUNDLE_SCHEMA:
-        bail("Unsupported --eaggl-in schema '%s' in %s (expected %s)" % (manifest.get("schema"), bundle_path, _EAGGL_BUNDLE_SCHEMA))
+        bail("Unsupported --eaggl-bundle-in schema '%s' in %s (expected %s)" % (manifest.get("schema"), bundle_path, _EAGGL_BUNDLE_SCHEMA))
 
     raw_default_inputs = manifest.get("default_inputs")
     if not isinstance(raw_default_inputs, dict):
-        bail("--eaggl-in manifest missing required object key 'default_inputs'")
+        bail("--eaggl-bundle-in manifest missing required object key 'default_inputs'")
 
     resolved_default_inputs = {}
     for key, rel_path in raw_default_inputs.items():
@@ -1117,9 +1117,9 @@ def _load_eaggl_bundle_inputs(bundle_path):
             bail("Invalid bundle path for default input '%s'" % key)
         joined = os.path.normpath(os.path.join(extract_dir, rel_path))
         if not joined.startswith(os.path.abspath(extract_dir) + os.sep):
-            bail("Refusing to resolve path outside --eaggl-in bundle for key '%s': %s" % (key, rel_path))
+            bail("Refusing to resolve path outside --eaggl-bundle-in bundle for key '%s': %s" % (key, rel_path))
         if not os.path.exists(joined):
-            bail("--eaggl-in manifest path for '%s' does not exist: %s" % (key, rel_path))
+            bail("--eaggl-bundle-in manifest path for '%s' does not exist: %s" % (key, rel_path))
         resolved_default_inputs[key] = joined
 
     return {
@@ -1131,10 +1131,10 @@ def _load_eaggl_bundle_inputs(bundle_path):
 
 
 def _apply_eaggl_bundle_inputs(_options):
-    if _options.eaggl_in is None:
+    if _options.eaggl_bundle_in is None:
         return None
 
-    bundle_info = _load_eaggl_bundle_inputs(_options.eaggl_in)
+    bundle_info = _load_eaggl_bundle_inputs(_options.eaggl_bundle_in)
     defaults = bundle_info["default_inputs"]
     applied = {}
 
@@ -1204,10 +1204,10 @@ eaggl_bundle_info = _apply_eaggl_bundle_inputs(options)
 if eaggl_bundle_info is not None:
     applied = eaggl_bundle_info.get("applied_defaults", {})
     if len(applied) == 0:
-        log("Loaded --eaggl-in bundle %s (no defaults applied; explicit CLI/config inputs took precedence)" % options.eaggl_in, INFO)
+        log("Loaded --eaggl-bundle-in bundle %s (no defaults applied; explicit CLI/config inputs took precedence)" % options.eaggl_bundle_in, INFO)
     else:
         applied_text = ", ".join(["%s=%s" % (k, applied[k]) for k in sorted(applied.keys())])
-        log("Loaded --eaggl-in bundle %s and applied defaults: %s" % (options.eaggl_in, applied_text), INFO)
+        log("Loaded --eaggl-bundle-in bundle %s and applied defaults: %s" % (options.eaggl_bundle_in, applied_text), INFO)
 
 if options.deterministic and options.seed is None:
     options.seed = 0
@@ -19201,7 +19201,7 @@ def _enforce_factor_only_input_boundary(options, mode_state):
     if len(forbidden_raw_inputs) > 0:
         bail(
             "These inputs belong to pigean.py and are not supported in eaggl.py: %s. "
-            "Run pigean.py first and pass outputs via --eaggl-in or --gene-stats-in/--gene-set-stats-in."
+            "Run pigean.py first and pass outputs via --eaggl-bundle-in or --gene-stats-in/--gene-set-stats-in."
             % ", ".join(sorted(forbidden_raw_inputs))
         )
 
@@ -19212,7 +19212,7 @@ def _enforce_factor_only_input_boundary(options, mode_state):
     if not has_x_source:
         bail(
             "EAGGL requires an X matrix input. Provide --X-in/--X-list/--Xd-in/--Xd-list "
-            "(or use --eaggl-in with an X default)."
+            "(or use --eaggl-bundle-in with an X default)."
         )
 
     workflow = mode_state.get("factor_workflow")
@@ -19226,7 +19226,7 @@ def _enforce_factor_only_input_boundary(options, mode_state):
         if len(missing) > 0:
             bail(
                 "EAGGL factor workflows require precomputed PIGEAN stats: missing %s "
-                "(or provide them in --eaggl-in)." % ", ".join(missing)
+                "(or provide them in --eaggl-bundle-in)." % ", ".join(missing)
             )
 
 

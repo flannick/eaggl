@@ -148,10 +148,10 @@ class EagglCliTest(unittest.TestCase):
         err = (proc.stderr or "") + (proc.stdout or "")
         self.assertIn("Require --gene-set-phewas-stats-in and --gene-phewas-stats-in", err)
 
-    def test_eaggl_in_populates_default_inputs(self) -> None:
+    def test_eaggl_bundle_in_populates_default_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             bundle_path = self._write_minimal_eaggl_bundle(Path(td))
-            proc = self._run("factor", "--eaggl-in", str(bundle_path), "--print-effective-config")
+            proc = self._run("factor", "--eaggl-bundle-in", str(bundle_path), "--print-effective-config")
             self.assertEqual(proc.returncode, 0, msg=(proc.stderr or "") + (proc.stdout or ""))
             payload = json.loads(proc.stdout)
             options = payload["options"]
@@ -163,14 +163,14 @@ class EagglCliTest(unittest.TestCase):
             self.assertIn("eaggl_bundle", payload)
             self.assertEqual(payload["eaggl_bundle"]["schema"], "pigean_eaggl_bundle/v1")
 
-    def test_eaggl_in_respects_cli_overrides(self) -> None:
+    def test_eaggl_bundle_in_respects_cli_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             bundle_path = self._write_minimal_eaggl_bundle(Path(td))
             override_gene_stats = Path(td) / "override_gene_stats.tsv"
             override_gene_stats.write_text("Gene\tprior\nGENE2\t0.2\n", encoding="utf-8")
             proc = self._run(
                 "factor",
-                "--eaggl-in",
+                "--eaggl-bundle-in",
                 str(bundle_path),
                 "--gene-stats-in",
                 str(override_gene_stats),

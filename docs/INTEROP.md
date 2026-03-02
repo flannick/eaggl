@@ -16,7 +16,7 @@ $PYTHON src/pigean.py gibbs \
   --positive-controls-list INS,GCK,HNF1A \
   --gene-stats-out results/pigean.gene_stats.out \
   --gene-set-stats-out results/pigean.gene_set_stats.out \
-  --eaggl-out results/pigean_to_eaggl.tar.gz
+  --eaggl-bundle-out results/pigean_to_eaggl.tar.gz
 ```
 
 Bundle output requirements:
@@ -38,14 +38,14 @@ In the `eaggl` repo:
 PYTHON=../../.venv/bin/python
 
 $PYTHON src/eaggl.py factor \
-  --eaggl-in /abs/path/to/pigean/results/pigean_to_eaggl.tar.gz \
+  --eaggl-bundle-in /abs/path/to/pigean/results/pigean_to_eaggl.tar.gz \
   --factors-out results/factors.out \
   --gene-set-clusters-out results/gene_set_clusters.out
 ```
 
 ## Fallback Path: Separate Files
 
-If you do not use `--eaggl-in`, provide files directly:
+If you do not use `--eaggl-bundle-in`, provide files directly:
 
 ```bash
 PYTHON=../../.venv/bin/python
@@ -61,7 +61,7 @@ $PYTHON src/eaggl.py factor \
 
 When both bundle and explicit flags are present:
 
-1. `--eaggl-in` loads defaults from bundle manifest
+1. `--eaggl-bundle-in` loads defaults from bundle manifest
 2. explicit CLI/config file flags override those defaults
 3. workflow validation runs after merge and hard-fails on missing required inputs
 
@@ -69,7 +69,7 @@ Example (override bundled gene stats):
 
 ```bash
 $PYTHON src/eaggl.py factor \
-  --eaggl-in /path/to/handoff.tar.gz \
+  --eaggl-bundle-in /path/to/handoff.tar.gz \
   --gene-stats-in /path/to/override_gene_stats.out \
   --factors-out results/factors.out
 ```
@@ -80,7 +80,7 @@ Use this to inspect resolved inputs and workflow selection before expensive runs
 
 ```bash
 $PYTHON src/eaggl.py factor \
-  --eaggl-in /path/to/handoff.tar.gz \
+  --eaggl-bundle-in /path/to/handoff.tar.gz \
   --print-effective-config
 ```
 
