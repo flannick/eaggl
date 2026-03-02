@@ -32,6 +32,7 @@ try:
     from .pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         coerce_config_value as pegs_coerce_config_value,
+        format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
@@ -43,6 +44,7 @@ except ImportError:
     from pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         coerce_config_value as pegs_coerce_config_value,
+        format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
@@ -487,10 +489,7 @@ def _apply_config_overrides(_options, _args, _parser, _argv):
             normalized_config_key = normalized_config_key.replace("-", "_")
             if normalized_config_key in REMOVED_OPTION_REPLACEMENTS:
                 replacement = REMOVED_OPTION_REPLACEMENTS[normalized_config_key]
-                if replacement is None:
-                    bail("Config key '%s' has been removed in %s and is no longer supported" % (raw_key, config_path))
-                replacement_config_key = replacement[2:].replace("-", "_") if replacement.startswith("--") else replacement
-                bail("Config key '%s' has been removed in %s; use '%s' (CLI: %s) instead" % (raw_key, config_path, replacement_config_key, replacement))
+                bail(pegs_format_removed_option_message(raw_key, replacement, context="config", config_path=config_path))
         key = raw_key
         if isinstance(key, str) and key.startswith("--"):
             key = key[2:]
@@ -559,10 +558,7 @@ def _fail_removed_cli_aliases(_argv):
         _normalized = _flag[2:].replace("-", "_")
         if _normalized in REMOVED_OPTION_REPLACEMENTS:
             replacement = REMOVED_OPTION_REPLACEMENTS[_normalized]
-            if replacement is None:
-                sys.stderr.write("Error: option %s has been removed and is no longer supported\n" % _flag)
-                sys.exit(2)
-            sys.stderr.write("Error: option %s has been removed; use %s instead\n" % (_flag, replacement))
+            sys.stderr.write("%s\n" % pegs_format_removed_option_message(_flag, replacement, context="cli"))
             sys.exit(2)
 
 def _enforce_eaggl_mode_ownership(_mode):
