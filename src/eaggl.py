@@ -8040,18 +8040,16 @@ class GeneSetData(object):
                 priors = np.array([], dtype=np.float64)
             self.gene_pheno_priors = sparse.csc_matrix((priors, (row, col)), shape=(len(self.genes), len(self.phenos)))
         
-        self.anchor_gene_mask = None
         if anchor_genes is not None:
-            self.anchor_gene_mask = np.array([x in anchor_genes for x in self.genes])
-            if np.sum(self.anchor_gene_mask) == 0:
+            anchor_gene_mask = np.array([x in anchor_genes for x in self.genes])
+            if np.sum(anchor_gene_mask) == 0:
                 bail("Couldn't find any match for %s" % list(anchor_genes))
 
         log("Read values for %d gene, pheno pairs" % (len(self.gene_pheno_Y.nonzero()[0]) if self.gene_pheno_Y is not None else 0), DEBUG)
 
-        self.anchor_pheno_mask = None
         if anchor_phenos is not None:
-            self.anchor_pheno_mask = np.array([x in anchor_phenos for x in self.phenos])
-            if np.sum(self.anchor_pheno_mask) == 0:
+            anchor_pheno_mask = np.array([x in anchor_phenos for x in self.phenos])
+            if np.sum(anchor_pheno_mask) == 0:
                 bail("Couldn't find any match for %s" % list(anchor_phenos))
 
 
