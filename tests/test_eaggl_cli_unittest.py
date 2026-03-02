@@ -129,6 +129,8 @@ class EagglCliTest(unittest.TestCase):
                 payload = json.loads(proc.stdout)
                 self.assertIn("factor_workflow", payload)
                 self.assertEqual(payload["factor_workflow"]["id"], expected_id)
+                self.assertIn("required_inputs", payload["factor_workflow"])
+                self.assertIn("missing_required_inputs", payload["factor_workflow"])
 
     def test_factor_workflow_missing_inputs_fails_fast(self) -> None:
         proc = self._run("factor", "--anchor-gene", "INS")
