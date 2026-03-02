@@ -32,6 +32,7 @@ try:
     from .pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         coerce_config_value as pegs_coerce_config_value,
+        configure_random_seed as pegs_configure_random_seed,
         format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -44,6 +45,7 @@ except ImportError:
     from pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         coerce_config_value as pegs_coerce_config_value,
+        configure_random_seed as pegs_configure_random_seed,
         format_removed_option_message as pegs_format_removed_option_message,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -972,12 +974,7 @@ if eaggl_bundle_info is not None:
         applied_text = ", ".join(["%s=%s" % (k, applied[k]) for k in sorted(applied.keys())])
         log("Loaded --eaggl-bundle-in bundle %s and applied defaults: %s" % (options.eaggl_bundle_in, applied_text), INFO)
 
-if options.deterministic and options.seed is None:
-    options.seed = 0
-if options.seed is not None:
-    random.seed(options.seed)
-    np.random.seed(options.seed)
-    log("Using deterministic random seed %d" % options.seed, INFO)
+pegs_configure_random_seed(options, random, np, log_fn=log, info_level=INFO)
 
 try:
     options.x_sparsify = [int(x) for x in options.x_sparsify]
