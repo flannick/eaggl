@@ -211,6 +211,12 @@ raise SystemExit("expected _read_correlations to fail fast before file IO")
         )
         self.assertEqual(proc.returncode, 0, msg=(proc.stderr or "") + (proc.stdout or ""))
 
+    def test_factor_rejects_raw_pigean_inputs(self) -> None:
+        proc = self._run("factor", "--gwas-in", "dummy.tsv")
+        self.assertNotEqual(proc.returncode, 0)
+        err = (proc.stderr or "") + (proc.stdout or "")
+        self.assertIn("belong to pigean.py", err)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19165,6 +19165,192 @@ def _build_main_mode_state():
     }
 
 
+def _enforce_factor_only_input_boundary(options, mode_state):
+    if not mode_state.get("run_factor"):
+        return
+
+    forbidden_raw_inputs = []
+    if options.gwas_in is not None:
+        forbidden_raw_inputs.append("--gwas-in")
+    if options.huge_statistics_in is not None:
+        forbidden_raw_inputs.append("--huge-statistics-in")
+    if options.huge_statistics_out is not None:
+        forbidden_raw_inputs.append("--huge-statistics-out")
+    if options.exomes_in is not None:
+        forbidden_raw_inputs.append("--exomes-in")
+    if options.positive_controls_in is not None:
+        forbidden_raw_inputs.append("--positive-controls-in")
+    if options.positive_controls_list is not None:
+        forbidden_raw_inputs.append("--positive-controls-list")
+    if options.positive_controls_all_in is not None:
+        forbidden_raw_inputs.append("--positive-controls-all-in")
+    if options.case_counts_in is not None:
+        forbidden_raw_inputs.append("--case-counts-in")
+    if options.ctrl_counts_in is not None:
+        forbidden_raw_inputs.append("--ctrl-counts-in")
+    if options.s2g_in is not None:
+        forbidden_raw_inputs.append("--s2g-in")
+    if options.credible_sets_in is not None:
+        forbidden_raw_inputs.append("--credible-sets-in")
+
+    if options.add_gene_sets_by_naive is not None:
+        forbidden_raw_inputs.append("--add-gene-sets-by-naive")
+    if options.add_gene_sets_by_gibbs is not None:
+        forbidden_raw_inputs.append("--add-gene-sets-by-gibbs")
+
+    if len(forbidden_raw_inputs) > 0:
+        bail(
+            "These inputs belong to pigean.py and are not supported in eaggl.py: %s. "
+            "Run pigean.py first and pass outputs via --eaggl-in or --gene-stats-in/--gene-set-stats-in."
+            % ", ".join(sorted(forbidden_raw_inputs))
+        )
+
+    has_x_source = any(
+        x is not None
+        for x in [options.X_in, options.X_list, options.Xd_in, options.Xd_list]
+    )
+    if not has_x_source:
+        bail(
+            "EAGGL requires an X matrix input. Provide --X-in/--X-list/--Xd-in/--Xd-list "
+            "(or use --eaggl-in with an X default)."
+        )
+
+    workflow = mode_state.get("factor_workflow")
+    use_phewas_for_factoring = bool(workflow and workflow.get("use_phewas_for_factoring"))
+    if not use_phewas_for_factoring:
+        missing = []
+        if options.gene_stats_in is None:
+            missing.append("--gene-stats-in")
+        if options.gene_set_stats_in is None:
+            missing.append("--gene-set-stats-in")
+        if len(missing) > 0:
+            bail(
+                "EAGGL factor workflows require precomputed PIGEAN stats: missing %s "
+                "(or provide them in --eaggl-in)." % ", ".join(missing)
+            )
+
+
+def _run_main_factor_only_pipeline(g, options, mode_state):
+    current_workflow = mode_state.get("factor_workflow")
+    workflow_id = current_workflow.get("id") if isinstance(current_workflow, dict) else None
+
+    # Read IDs first so read_X can skip gene sets outside selected strategy inputs.
+    gene_set_ids = None
+    factor_uses_phewas_gene_set_ids = workflow_id in set(["F4", "F5", "F6", "F7", "F8"])
+    if factor_uses_phewas_gene_set_ids:
+        if options.gene_set_phewas_stats_in is None:
+            bail("Need --gene-set-phewas-stats-in")
+        gene_set_ids = g.read_gene_set_phewas_statistics(
+            options.gene_set_phewas_stats_in,
+            stats_id_col=options.gene_set_phewas_stats_id_col,
+            stats_pheno_col=options.gene_set_phewas_stats_pheno_col,
+            stats_beta_col=options.gene_set_phewas_stats_beta_col,
+            stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col,
+            min_gene_set_beta=options.min_gene_set_read_beta,
+            min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected,
+            return_only_ids=True,
+            phenos_to_match=options.anchor_phenos,
+            max_num_entries_at_once=options.max_read_entries_at_once,
+        )
+    elif options.gene_set_stats_in is not None:
+        gene_set_ids = g.read_gene_set_statistics(
+            options.gene_set_stats_in,
+            stats_id_col=options.gene_set_stats_id_col,
+            stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col,
+            stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col,
+            stats_p_col=options.gene_set_stats_p_col,
+            stats_se_col=options.gene_set_stats_se_col,
+            stats_beta_col=options.gene_set_stats_beta_col,
+            stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col,
+            ignore_negative_exp_beta=options.ignore_negative_exp_beta,
+            max_gene_set_p=options.max_gene_set_read_p,
+            min_gene_set_beta=options.min_gene_set_read_beta,
+            min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected,
+            return_only_ids=True,
+        )
+
+    if gene_set_ids is not None:
+        log("Will read %d gene sets" % (len(gene_set_ids)), DEBUG)
+
+    # Only read matrix inputs in EAGGL. No beta/prior/Gibbs fitting.
+    g.read_X(
+        options.X_in,
+        Xd_in=options.Xd_in,
+        X_list=options.X_list,
+        Xd_list=options.Xd_list,
+        V_in=options.V_in,
+        min_gene_set_size=options.min_gene_set_size,
+        max_gene_set_size=options.max_gene_set_size,
+        only_ids=gene_set_ids,
+        only_inc_genes=options.anchor_genes if mode_state["use_phewas_for_factoring"] else None,
+        fraction_inc_genes=options.add_gene_sets_by_fraction,
+        add_all_genes=options.add_all_genes,
+        prune_gene_sets=options.prune_gene_sets,
+        weighted_prune_gene_sets=options.weighted_prune_gene_sets,
+        prune_deterministically=options.prune_deterministically,
+        x_sparsify=options.x_sparsify,
+        add_ext=options.add_ext,
+        add_top=options.add_top,
+        add_bottom=options.add_bottom,
+        filter_negative=options.filter_negative,
+        threshold_weights=options.threshold_weights,
+        cap_weights=options.cap_weights,
+        permute_gene_sets=options.permute_gene_sets,
+        max_gene_set_p=options.max_gene_set_read_p,
+        filter_gene_set_p=None,
+        max_num_gene_sets_initial=options.max_num_gene_sets_initial,
+        max_num_gene_sets=options.max_num_gene_sets,
+        max_num_gene_sets_hyper=options.max_num_gene_sets_hyper,
+        skip_betas=True,
+        batch_separator=options.batch_separator,
+        ignore_genes=set(options.ignore_genes),
+        file_separator=options.file_separator,
+        show_progress=not options.hide_progress,
+        max_num_entries_at_once=options.max_read_entries_at_once,
+    )
+
+    if not g.has_gene_sets():
+        log("No gene sets survived the input filters; stopping")
+        sys.exit(0)
+
+    if options.gene_stats_in is not None:
+        g.read_Y(
+            gene_bfs_in=options.gene_stats_in,
+            show_progress=not options.hide_progress,
+            gene_bfs_id_col=options.gene_stats_id_col,
+            gene_bfs_log_bf_col=options.gene_stats_log_bf_col,
+            gene_bfs_combined_col=options.gene_stats_combined_col,
+            gene_bfs_prob_col=options.gene_stats_prob_col,
+            gene_bfs_prior_col=options.gene_stats_prior_col,
+            gene_covs_in=options.gene_covs_in,
+            hold_out_chrom=options.hold_out_chrom,
+        )
+
+    if options.gene_set_stats_in is not None:
+        g.read_gene_set_statistics(
+            options.gene_set_stats_in,
+            stats_id_col=options.gene_set_stats_id_col,
+            stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col,
+            stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col,
+            stats_p_col=options.gene_set_stats_p_col,
+            stats_se_col=options.gene_set_stats_se_col,
+            stats_beta_col=options.gene_set_stats_beta_col,
+            stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col,
+            ignore_negative_exp_beta=options.ignore_negative_exp_beta,
+            max_gene_set_p=options.max_gene_set_read_p,
+            min_gene_set_beta=options.min_gene_set_read_beta,
+            min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected,
+        )
+
+    factor_input_state = {
+        "anchor_gene_mask": None,
+        "anchor_pheno_mask": None,
+    }
+    if mode_state["run_factor"]:
+        factor_input_state = _load_factor_phewas_inputs(g, options)
+    return factor_input_state
+
+
 def _log_runtime_environment_if_requested(options):
     if options.hide_opts:
         return
@@ -19610,31 +19796,15 @@ def _should_run_main_factor_phewas_stage(mode_state):
 
 def main():
 
-    _log_runtime_environment_if_requested(options)
     mode_state = _build_main_mode_state()
+    _enforce_factor_only_input_boundary(options, mode_state)
+    _log_runtime_environment_if_requested(options)
 
     g = GeneSetData(background_prior=options.background_prior, batch_size=options.batch_size)
     sigma2_cond = _configure_main_hyperparameters(g, options)
     _initialize_main_mappings(g, options)
-
-    if mode_state["run_factor"] and mode_state["expand_gene_sets"] and (options.add_gene_sets_by_enrichment_p is not None or options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None):
-        #we are going to use the machinery of betas/gibbs to expand the gene list
-        #even though internally this will be stored as betas/priors/etc, we will not be factoring this
-        #these will be overwritten during the factoring
-        options.positive_controls_list = options.anchor_genes
-        _default_for_gene_list_inputs(options)
-
-    #we don't need to read in any matrices if we are anchoring to phenotypes, because those will use the (later) phewas files
-    #we need to use it if we are anchoring to a gene only if we are going to use the phewas results to factor
-    extend_for_gene = _compute_extend_for_gene(mode_state, options)
-    Y_not_loaded = _load_main_y_inputs(g, options, mode_state, extend_for_gene)
-
-    factor_input_state = {
-        "anchor_gene_mask": None,
-        "anchor_pheno_mask": None,
-    }
-    if not mode_state["run_huge"]:
-        factor_input_state = _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded)
+    _ = sigma2_cond
+    factor_input_state = _run_main_factor_only_pipeline(g, options, mode_state)
 
     _write_main_primary_outputs(g, options)
 
