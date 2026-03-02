@@ -19173,6 +19173,7 @@ def _build_main_mode_state():
         "run_gibbs": run_gibbs,
         "run_factor": run_factor,
         "run_phewas": run_phewas,
+        "run_factor_phewas": options.factor_phewas_from_gene_phewas_stats_in is not None,
         "run_naive_factor": run_naive_factor,
         "run_sim": run_sim,
         "use_phewas_for_factoring": use_phewas_for_factoring,
@@ -19595,6 +19596,10 @@ def _run_main_factor_phewas_stage(g, options):
     if options.factor_phewas_stats_out:
         g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
 
+
+def _should_run_main_factor_phewas_stage(mode_state):
+    return bool(mode_state["run_factor"] and mode_state["run_factor_phewas"])
+
 def main():
 
     _log_runtime_environment_if_requested(options)
@@ -19629,7 +19634,7 @@ def main():
 
     _write_main_factor_outputs(g, options)
 
-    if options.factor_phewas_from_gene_phewas_stats_in is not None:
+    if _should_run_main_factor_phewas_stage(mode_state):
         _run_main_factor_phewas_stage(g, options)
 
 
