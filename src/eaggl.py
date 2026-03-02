@@ -11625,6 +11625,10 @@ class GeneSetData(object):
         if self.X_orig is None:
             bail("Cannot run factoring without X")
 
+        # Persist explicit anchor masks for downstream output writers.
+        self.anchor_pheno_mask = np.copy(anchor_pheno_mask) if anchor_pheno_mask is not None else None
+        self.anchor_gene_mask = np.copy(anchor_gene_mask) if anchor_gene_mask is not None else None
+
         if (anchor_any_gene or anchor_any_pheno or anchor_gene_set or anchor_gene_mask is not None or anchor_pheno_mask is not None or pheno_prune_value is not None or pheno_prune_number is not None) and self.X_phewas_beta is None:
             bail("Cannot run factoring without X phewas")
 
@@ -19441,8 +19445,12 @@ def _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loade
         if options.betas_uncorrected_from_phewas:
             g.calculate_gene_set_statistics(max_gene_set_p=1, run_gls=False, run_logistic=not options.linear, max_for_linear=options.max_for_linear, run_corrected_ols=not options.ols, use_sampling_for_betas=options.use_sampling_for_betas, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_loc_file=options.gene_loc_file, gene_cor_file=options.gene_cor_file, gene_cor_file_gene_col=options.gene_cor_file_gene_col, gene_cor_file_cor_start_col=options.gene_cor_file_cor_start_col, Y=g.gene_pheno_Y, run_using_phewas=True)
 
+    factor_input_state = {
+        "anchor_gene_mask": None,
+        "anchor_pheno_mask": None,
+    }
     if run_factor:
-        _load_factor_phewas_inputs(g, options)
+        factor_input_state = _load_factor_phewas_inputs(g, options)
 
     if (run_beta or run_priors or run_naive_priors or run_gibbs or run_beta_for_factor) and g.sigma2 is None:
         bail("Sigma2 was not initialized; provide --sigma2 explicitly")
@@ -19476,6 +19484,27 @@ def _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loade
         g.combined_prior_Ys = np.full(len(g.genes), options.const_gene_log_bf)
     elif run_gibbs or run_gibbs_for_factor:
         g.run_gibbs(min_num_iter=options.min_num_iter, max_num_iter=options.max_num_iter, total_num_iter=options.total_num_iter_gibbs, max_num_restarts=options.max_num_restarts, num_chains=options.num_chains, num_mad=options.num_mad, r_threshold_burn_in=options.r_threshold_burn_in, use_max_r_for_convergence=options.use_max_r_for_convergence, increase_hyper_if_betas_below=options.increase_hyper_if_betas_below, update_huge_scores=options.update_huge_scores, top_gene_prior=options.top_gene_prior, min_num_burn_in=options.min_num_burn_in, max_num_burn_in=options.max_num_burn_in, min_num_post_burn_in=options.min_num_post_burn_in, max_num_post_burn_in=options.max_num_post_burn_in, max_num_iter_betas=options.max_num_iter_betas, min_num_iter_betas=options.min_num_iter_betas, num_chains_betas=options.num_chains_betas, r_threshold_burn_in_betas=options.r_threshold_burn_in_betas, use_max_r_for_convergence_betas=options.use_max_r_for_convergence_betas, max_frac_sem_betas=options.max_frac_sem_betas, use_mean_betas=not options.use_sampled_betas_in_gibbs, warm_start=options.warm_start, burn_in_rhat_quantile=options.burn_in_rhat_quantile, burn_in_patience=options.burn_in_patience, burn_in_stall_window=options.burn_in_stall_window, burn_in_stall_delta=options.burn_in_stall_delta, stop_mcse_quantile=options.stop_mcse_quantile, stop_patience=options.stop_patience, stop_top_gene_k=options.stop_top_gene_k, stop_min_gene_d=options.stop_min_gene_d, max_abs_mcse_d=options.max_abs_mcse_d, max_rel_mcse_beta=options.max_rel_mcse_beta, active_beta_top_k=options.active_beta_top_k, active_beta_min_abs=options.active_beta_min_abs, beta_rel_mcse_denom_floor=options.beta_rel_mcse_denom_floor, stall_window=options.stall_window, stall_min_burn_in=options.stall_min_burn_in, stall_min_post_burn_in=options.stall_min_post_burn_in, stall_delta_rhat=options.stall_delta_rhat, stall_delta_mcse=options.stall_delta_mcse, stall_recent_window=options.stall_recent_window, stall_recent_eps=options.stall_recent_eps, stopping_preset_name=options.gibbs_stopping_preset, diag_every=options.diag_every, sparse_frac_gibbs=options.sparse_frac_gibbs, sparse_max_gibbs=options.sparse_max_gibbs, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, pre_filter_batch_size=options.pre_filter_batch_size, pre_filter_small_batch_size=options.pre_filter_small_batch_size, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel, gauss_seidel_betas=options.gauss_seidel_betas, num_batches_parallel=options.gibbs_num_batches_parallel, max_mb_X_h=options.gibbs_max_mb_X_h, initial_linear_filter=options.initial_linear_filter, adjust_priors=options.adjust_priors, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_set_stats_trace_out=options.gene_set_stats_trace_out, gene_stats_trace_out=options.gene_stats_trace_out, betas_trace_out=options.betas_trace_out)
+    return factor_input_state
+
+
+def _derive_factor_anchor_masks(g, options):
+    anchor_gene_mask = None
+    anchor_pheno_mask = None
+
+    if options.anchor_genes is not None:
+        anchor_gene_mask = np.array([x in options.anchor_genes for x in g.genes])
+        if np.sum(anchor_gene_mask) == 0:
+            bail("None of the anchor genes are in X")
+
+    if options.anchor_phenos is not None:
+        anchor_pheno_mask = np.array([x in options.anchor_phenos for x in g.phenos])
+        if np.sum(anchor_pheno_mask) == 0:
+            bail("None of the anchor phenos are in gene pheno matrix")
+
+    return {
+        "anchor_gene_mask": anchor_gene_mask,
+        "anchor_pheno_mask": anchor_pheno_mask,
+    }
 
 
 def _load_factor_phewas_inputs(g, options):
@@ -19486,6 +19515,7 @@ def _load_factor_phewas_inputs(g, options):
 
     if options.gene_phewas_bfs_in:
         g.read_gene_phewas_bfs(gene_phewas_bfs_in=options.gene_phewas_bfs_in,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, anchor_genes=options.anchor_genes, anchor_phenos=options.anchor_phenos, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, phewas_gene_to_X_gene_in=options.gene_phewas_id_to_X_id, min_value=options.min_gene_phewas_read_value, max_num_entries_at_once=options.max_read_entries_at_once)
+    return _derive_factor_anchor_masks(g, options)
 
 
 def _write_main_primary_outputs(g, options):
@@ -19555,7 +19585,7 @@ def _run_main_phewas_stage(g, options):
         g.write_phewas_statistics(options.phewas_stats_out)
 
 
-def _run_main_factor_stage(g, options, mode_state):
+def _run_main_factor_stage(g, options, mode_state, factor_input_state):
     if mode_state["expand_gene_sets"]:
         if options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None:
             assert(g.betas_uncorrected is not None)
@@ -19572,7 +19602,7 @@ def _run_main_factor_stage(g, options, mode_state):
     else:
         gene_or_pheno_filter_value = options.gene_filter_value
 
-    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=g.anchor_pheno_mask, anchor_gene_mask=g.anchor_gene_mask, anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state["anchor_pheno_mask"], anchor_gene_mask=factor_input_state["anchor_gene_mask"], anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
 
 
 def _write_main_factor_outputs(g, options):
@@ -19633,8 +19663,12 @@ def main():
     extend_for_gene = _compute_extend_for_gene(mode_state, options)
     Y_not_loaded = _load_main_y_inputs(g, options, mode_state, extend_for_gene)
 
+    factor_input_state = {
+        "anchor_gene_mask": None,
+        "anchor_pheno_mask": None,
+    }
     if not mode_state["run_huge"]:
-        _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded)
+        factor_input_state = _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded)
 
     _write_main_primary_outputs(g, options)
 
@@ -19642,7 +19676,7 @@ def main():
         _run_main_phewas_stage(g, options)
 
     if mode_state["run_factor"]:
-        _run_main_factor_stage(g, options, mode_state)
+        _run_main_factor_stage(g, options, mode_state, factor_input_state)
 
     _write_main_factor_outputs(g, options)
 
