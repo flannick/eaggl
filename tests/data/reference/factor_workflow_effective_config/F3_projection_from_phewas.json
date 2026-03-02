@@ -113,6 +113,7 @@
     "deterministic": true,
     "diag_every": 4,
     "disable_stall_detection": false,
+    "eaggl_in": null,
     "exomes_beta_col": null,
     "exomes_gene_col": null,
     "exomes_high_p": 0.05,
