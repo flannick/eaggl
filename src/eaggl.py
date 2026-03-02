@@ -19338,6 +19338,78 @@ def _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loade
     elif run_gibbs or run_gibbs_for_factor:
         g.run_gibbs(min_num_iter=options.min_num_iter, max_num_iter=options.max_num_iter, total_num_iter=options.total_num_iter_gibbs, max_num_restarts=options.max_num_restarts, num_chains=options.num_chains, num_mad=options.num_mad, r_threshold_burn_in=options.r_threshold_burn_in, use_max_r_for_convergence=options.use_max_r_for_convergence, increase_hyper_if_betas_below=options.increase_hyper_if_betas_below, update_huge_scores=options.update_huge_scores, top_gene_prior=options.top_gene_prior, min_num_burn_in=options.min_num_burn_in, max_num_burn_in=options.max_num_burn_in, min_num_post_burn_in=options.min_num_post_burn_in, max_num_post_burn_in=options.max_num_post_burn_in, max_num_iter_betas=options.max_num_iter_betas, min_num_iter_betas=options.min_num_iter_betas, num_chains_betas=options.num_chains_betas, r_threshold_burn_in_betas=options.r_threshold_burn_in_betas, use_max_r_for_convergence_betas=options.use_max_r_for_convergence_betas, max_frac_sem_betas=options.max_frac_sem_betas, use_mean_betas=not options.use_sampled_betas_in_gibbs, warm_start=options.warm_start, burn_in_rhat_quantile=options.burn_in_rhat_quantile, burn_in_patience=options.burn_in_patience, burn_in_stall_window=options.burn_in_stall_window, burn_in_stall_delta=options.burn_in_stall_delta, stop_mcse_quantile=options.stop_mcse_quantile, stop_patience=options.stop_patience, stop_top_gene_k=options.stop_top_gene_k, stop_min_gene_d=options.stop_min_gene_d, max_abs_mcse_d=options.max_abs_mcse_d, max_rel_mcse_beta=options.max_rel_mcse_beta, active_beta_top_k=options.active_beta_top_k, active_beta_min_abs=options.active_beta_min_abs, beta_rel_mcse_denom_floor=options.beta_rel_mcse_denom_floor, stall_window=options.stall_window, stall_min_burn_in=options.stall_min_burn_in, stall_min_post_burn_in=options.stall_min_post_burn_in, stall_delta_rhat=options.stall_delta_rhat, stall_delta_mcse=options.stall_delta_mcse, stall_recent_window=options.stall_recent_window, stall_recent_eps=options.stall_recent_eps, stopping_preset_name=options.gibbs_stopping_preset, diag_every=options.diag_every, sparse_frac_gibbs=options.sparse_frac_gibbs, sparse_max_gibbs=options.sparse_max_gibbs, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, pre_filter_batch_size=options.pre_filter_batch_size, pre_filter_small_batch_size=options.pre_filter_small_batch_size, max_allowed_batch_correlation=options.max_allowed_batch_correlation, gauss_seidel=options.gauss_seidel, gauss_seidel_betas=options.gauss_seidel_betas, num_batches_parallel=options.gibbs_num_batches_parallel, max_mb_X_h=options.gibbs_max_mb_X_h, initial_linear_filter=options.initial_linear_filter, adjust_priors=options.adjust_priors, correct_betas_mean=options.correct_betas_mean, correct_betas_var=options.correct_betas_var, gene_set_stats_trace_out=options.gene_set_stats_trace_out, gene_stats_trace_out=options.gene_stats_trace_out, betas_trace_out=options.betas_trace_out)
 
+
+def _write_main_primary_outputs(g, options):
+    if options.gene_set_stats_out:
+        g.write_gene_set_statistics(options.gene_set_stats_out, max_no_write_gene_set_beta=options.max_no_write_gene_set_beta, max_no_write_gene_set_beta_uncorrected=options.max_no_write_gene_set_beta_uncorrected)
+    if options.phewas_gene_set_stats_out:
+        g.write_phewas_gene_set_statistics(options.phewas_gene_set_stats_out, max_no_write_gene_set_beta=options.max_no_write_gene_set_beta, max_no_write_gene_set_beta_uncorrected=options.max_no_write_gene_set_beta_uncorrected)
+    if options.gene_stats_out:
+        g.write_gene_statistics(options.gene_stats_out)
+    if options.gene_gene_set_stats_out:
+        g.write_gene_gene_set_statistics(options.gene_gene_set_stats_out, max_no_write_gene_gene_set_beta=options.max_no_write_gene_gene_set_beta, write_filter_beta_uncorrected=options.use_beta_uncorrected_for_gene_gene_set_write_filter)
+    if options.gene_set_overlap_stats_out:
+        g.write_gene_set_overlap_statistics(options.gene_set_overlap_stats_out)
+    if options.gene_covs_out:
+        g.write_gene_covariates(options.gene_covs_out)
+    if options.gene_effectors_out:
+        g.write_gene_effectors(options.gene_effectors_out)
+
+
+def _run_main_phewas_stage(g, options):
+    bfs_to_use = options.run_phewas_from_gene_phewas_stats_in
+    if options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in and g.num_gene_phewas_filtered == 0 and g.read_gene_phewas():
+        # We can skip re-reading if the same unfiltered input file was already loaded.
+        bfs_to_use = None
+    g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas)
+    if options.phewas_stats_out:
+        g.write_phewas_statistics(options.phewas_stats_out)
+
+
+def _run_main_factor_stage(g, options, mode_state):
+    if mode_state["expand_gene_sets"]:
+        if options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None:
+            assert(g.betas_uncorrected is not None)
+            g.subset_gene_sets(g.betas_uncorrected / g.scale_factors > (options.add_gene_sets_by_gibbs if options.add_gene_sets_by_gibbs is not None else options.add_gene_sets_by_naive))
+            if len(g.gene_sets) == 0:
+                bail("Subsetting gene sets by %s removed all gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive"))
+            else:
+                log("Pruning by %s resulted in %d gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive", len(g.gene_sets)), DEBUG)
+
+    if options.anchor_gene_set:
+        gene_or_pheno_filter_value = options.gene_set_pheno_filter_value
+    elif mode_state["factor_gene_set_x_pheno"]:
+        gene_or_pheno_filter_value = options.pheno_filter_value
+    else:
+        gene_or_pheno_filter_value = options.gene_filter_value
+
+    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=g.anchor_pheno_mask, anchor_gene_mask=g.anchor_gene_mask, anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+
+
+def _write_main_factor_outputs(g, options):
+    if options.factors_out is not None:
+        g.write_matrix_factors(options.factors_out)
+    if options.factors_anchor_out is not None:
+        g.write_matrix_factors(options.factors_anchor_out, write_anchor_specific=True)
+    if options.gene_set_clusters_out is not None or options.gene_clusters_out is not None or options.pheno_clusters_out is not None:
+        g.write_clusters(options.gene_set_clusters_out, options.gene_clusters_out, options.pheno_clusters_out)
+    if options.gene_set_anchor_clusters_out is not None or options.gene_anchor_clusters_out is not None or options.pheno_anchor_clusters_out is not None:
+        g.write_clusters(options.gene_set_anchor_clusters_out, options.gene_anchor_clusters_out, options.pheno_anchor_clusters_out, write_anchor_specific=True)
+    if options.gene_pheno_stats_out is not None:
+        g.write_gene_pheno_statistics(options.gene_pheno_stats_out, min_value_to_print=options.max_no_write_gene_pheno)
+
+
+def _run_main_factor_phewas_stage(g, options):
+    if g.num_factors() > 0:
+        bfs_to_use = options.factor_phewas_from_gene_phewas_stats_in
+        if (options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in) or (options.run_phewas_from_gene_phewas_stats_in is not None and bfs_to_use == options.run_phewas_from_gene_phewas_stats_in) and g.num_gene_phewas_filtered == 0:
+            bfs_to_use = None
+        g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, run_for_factors=True, batch_size=300, min_gene_factor_weight=options.factor_phewas_min_gene_factor_weight)
+        if options.factor_phewas_stats_out:
+            g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
+    else:
+        log("No factors; not performing factor phewas")
+
 def main():
 
     _log_runtime_environment_if_requested(options)
@@ -19362,97 +19434,18 @@ def main():
     if not mode_state["run_huge"]:
         _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded)
 
-    if options.gene_set_stats_out:
-        g.write_gene_set_statistics(options.gene_set_stats_out, max_no_write_gene_set_beta=options.max_no_write_gene_set_beta, max_no_write_gene_set_beta_uncorrected=options.max_no_write_gene_set_beta_uncorrected)
+    _write_main_primary_outputs(g, options)
 
-    if options.phewas_gene_set_stats_out:
-        g.write_phewas_gene_set_statistics(options.phewas_gene_set_stats_out, max_no_write_gene_set_beta=options.max_no_write_gene_set_beta, max_no_write_gene_set_beta_uncorrected=options.max_no_write_gene_set_beta_uncorrected)
+    if mode_state["run_phewas"]:
+        _run_main_phewas_stage(g, options)
 
-    if options.gene_stats_out:
-        g.write_gene_statistics(options.gene_stats_out)
+    if mode_state["run_factor"]:
+        _run_main_factor_stage(g, options, mode_state)
 
-    if options.gene_gene_set_stats_out:
-        g.write_gene_gene_set_statistics(options.gene_gene_set_stats_out, max_no_write_gene_gene_set_beta=options.max_no_write_gene_gene_set_beta, write_filter_beta_uncorrected=options.use_beta_uncorrected_for_gene_gene_set_write_filter)
-
-    if options.gene_set_overlap_stats_out:
-        g.write_gene_set_overlap_statistics(options.gene_set_overlap_stats_out)
-
-    if options.gene_covs_out:
-        g.write_gene_covariates(options.gene_covs_out)
-
-    if options.gene_effectors_out:
-        g.write_gene_effectors(options.gene_effectors_out)
-
-    if run_phewas:
-        #run the phewas
-
-        bfs_to_use = options.run_phewas_from_gene_phewas_stats_in
-
-        if options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in and g.num_gene_phewas_filtered == 0 and g.read_gene_phewas():
-            #we can skip reading if we are using the same file as previously read and we didn't threshold that file
-            bfs_to_use = None
-
-        g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas)
-
-        if options.phewas_stats_out:
-            g.write_phewas_statistics(options.phewas_stats_out)
-
-    if run_factor:
-
-        if expand_gene_sets:
-
-            if options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None:
-                assert(g.betas_uncorrected is not None)
-                #need to use external ones here
-                g.subset_gene_sets(g.betas_uncorrected / g.scale_factors > (options.add_gene_sets_by_gibbs if options.add_gene_sets_by_gibbs is not None else options.add_gene_sets_by_naive))
-                if len(g.gene_sets) == 0:
-                    bail("Subsetting gene sets by %s removed all gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive"))
-                else:
-                    log("Pruning by %s resulted in %d gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive", len(g.gene_sets)), DEBUG)
-
-        #need to update signature here and replace
-
-        if options.anchor_gene_set:
-            gene_or_pheno_filter_value = options.gene_set_pheno_filter_value
-        elif factor_gene_set_x_pheno:
-            gene_or_pheno_filter_value = options.pheno_filter_value
-        else:
-            gene_or_pheno_filter_value = options.gene_filter_value
-
-        g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=g.anchor_pheno_mask, anchor_gene_mask=g.anchor_gene_mask, anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
-
-
-    if options.factors_out is not None:
-        g.write_matrix_factors(options.factors_out)
-
-    if options.factors_anchor_out is not None:
-        g.write_matrix_factors(options.factors_anchor_out, write_anchor_specific=True)
-
-    if options.gene_set_clusters_out is not None or options.gene_clusters_out is not None or options.pheno_clusters_out is not None:
-        g.write_clusters(options.gene_set_clusters_out, options.gene_clusters_out, options.pheno_clusters_out)
-
-    if options.gene_set_anchor_clusters_out is not None or options.gene_anchor_clusters_out is not None or options.pheno_anchor_clusters_out is not None:
-        g.write_clusters(options.gene_set_anchor_clusters_out, options.gene_anchor_clusters_out, options.pheno_anchor_clusters_out, write_anchor_specific=True)
-
-
-    if options.gene_pheno_stats_out is not None:
-        g.write_gene_pheno_statistics(options.gene_pheno_stats_out, min_value_to_print=options.max_no_write_gene_pheno)
+    _write_main_factor_outputs(g, options)
 
     if options.factor_phewas_from_gene_phewas_stats_in is not None:
-
-        if g.num_factors() > 0:
-
-            bfs_to_use = options.factor_phewas_from_gene_phewas_stats_in
-
-            if (options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in) or (options.run_phewas_from_gene_phewas_stats_in is not None and bfs_to_use == options.run_phewas_from_gene_phewas_stats_in) and g.num_gene_phewas_filtered == 0:
-                #we can skip reading if we are using the same file as previously read and we didn't threshold that file
-                bfs_to_use = None
-
-            g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, run_for_factors=True, batch_size=300, min_gene_factor_weight=options.factor_phewas_min_gene_factor_weight)
-            if options.factor_phewas_stats_out:
-                g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
-        else:
-            log("No factors; not performing factor phewas")
+        _run_main_factor_phewas_stage(g, options)
 
 
     if options.params_out:
