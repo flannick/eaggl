@@ -810,6 +810,8 @@ def _json_safe(_value):
         return _value.item()
     if isinstance(_value, np.ndarray):
         return [_json_safe(x) for x in _value.tolist()]
+    if isinstance(_value, set):
+        return [_json_safe(x) for x in sorted(_value)]
     if isinstance(_value, tuple):
         return [_json_safe(x) for x in _value]
     if isinstance(_value, list):
@@ -858,6 +860,67 @@ def _enforce_eaggl_mode_ownership(_mode):
     factor_modes = set(["factor", "naive_factor"])
     if _mode not in factor_modes:
         bail("Mode '%s' belongs to pigean.py; run with pigean.py instead of eaggl.py" % _mode)
+
+def _classify_factor_workflow(_options):
+    has_gene_set_phewas = _options.gene_set_phewas_stats_in is not None
+    has_gene_phewas = _options.gene_phewas_bfs_in is not None
+    projection_source = _options.gene_set_phewas_stats_in if has_gene_set_phewas else _options.gene_phewas_bfs_in
+
+    workflow = {
+        "id": None,
+        "label": None,
+        "error": None,
+        "factor_gene_set_x_pheno": bool(_options.anchor_genes or _options.anchor_any_gene or _options.anchor_gene_set),
+        "use_phewas_for_factoring": bool(_options.anchor_phenos is not None or _options.anchor_any_pheno or _options.anchor_genes is not None or _options.anchor_any_gene),
+        "expand_gene_sets": bool(_options.anchor_genes is not None and len(_options.anchor_genes) > 1),
+    }
+
+    if _options.anchor_genes is not None and len(_options.anchor_genes) == 1:
+        workflow["id"] = "F6"
+        workflow["label"] = "single gene anchoring (to %s)" % _options.anchor_genes
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    elif _options.anchor_genes is not None and len(_options.anchor_genes) > 1:
+        workflow["id"] = "F7"
+        workflow["label"] = "multiple gene anchoring (to %s)" % _options.anchor_genes
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    elif _options.anchor_any_gene:
+        workflow["id"] = "F8"
+        workflow["label"] = "any gene anchoring"
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    elif _options.anchor_gene_set:
+        workflow["id"] = "F9"
+        workflow["label"] = "gene set anchoring (to input phenotype/gene set)"
+        if _options.run_phewas_from_gene_phewas_stats_in is None:
+            workflow["error"] = "Require --run-phewas-from-gene-phewas-stats"
+    elif _options.anchor_phenos is not None and len(_options.anchor_phenos) == 1:
+        workflow["id"] = "F4"
+        workflow["label"] = "single phenotype anchoring (to %s) but with phewas statistics used" % _options.anchor_phenos
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    elif _options.anchor_phenos is not None and len(_options.anchor_phenos) > 1:
+        workflow["id"] = "F4"
+        workflow["label"] = "multiple phenotype anchoring (to %s)" % _options.anchor_phenos
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    elif _options.anchor_any_pheno:
+        workflow["id"] = "F5"
+        workflow["label"] = "any phenotype anchoring"
+        if not has_gene_set_phewas or not has_gene_phewas:
+            workflow["error"] = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
+    else:
+        workflow["label"] = "single phenotype anchoring (to %s) using default statistics" % _options.anchor_phenos
+        if projection_source is not None:
+            workflow["id"] = "F3"
+            workflow["label"] = "%s. Will project using %s" % (workflow["label"], projection_source)
+        elif _options.positive_controls_in is not None or _options.positive_controls_list is not None:
+            workflow["id"] = "F2"
+        else:
+            workflow["id"] = "F1"
+
+    return workflow
 
 _fail_removed_cli_aliases(sys.argv[1:])
 
@@ -941,6 +1004,7 @@ pops_defaults = False
 use_phewas_for_factoring = False
 factor_gene_set_x_pheno = False
 expand_gene_sets = False
+factor_workflow = None
 
 
 if mode == "huge" or mode == "huge_calc":
@@ -962,43 +1026,12 @@ elif mode == "factor" or mode == "naive_factor": #run factoring, phewas factorin
     if mode == "naive_factor":
         run_naive_factor = True
 
-    error = None
-    if options.anchor_genes is not None and len(options.anchor_genes) == 1:
-        factor_type = "single gene anchoring (to %s)" % options.anchor_genes
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    elif options.anchor_genes is not None and len(options.anchor_genes) > 1:
-        factor_type = "multiple gene anchoring (to %s)" % options.anchor_genes
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    elif options.anchor_any_gene:
-        factor_type = "any gene anchoring"
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    elif options.anchor_gene_set:
-        factor_type = "gene set anchoring (to input phenotype/gene set)"
-        if options.run_phewas_from_gene_phewas_stats_in is None:
-            error = "Require --run-phewas-from-gene-phewas-stats"
-    elif options.anchor_phenos is not None and len(options.anchor_phenos) == 1:
-        factor_type = "single phenotype anchoring (to %s) but with phewas statistics used" % options.anchor_phenos
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    elif options.anchor_phenos is not None and len(options.anchor_phenos) > 1:
-        factor_type = "multiple phenotype anchoring (to %s)" % options.anchor_phenos
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    elif options.anchor_any_pheno:
-        factor_type = "any phenotype anchoring"
-        if options.gene_set_phewas_stats_in is None or options.gene_phewas_bfs_in is None:
-            error = "Require --gene-set-phewas-stats-in and --gene-phewas-stats-in"
-    else:
-        factor_type = "single phenotype anchoring (to %s) using default statistics" % options.anchor_phenos
-        if options.gene_set_phewas_stats_in is not None or options.gene_phewas_bfs_in is not None:
-            factor_type = "%s. Will project using %s" % (factor_type, options.gene_set_phewas_stats_in if options.gene_set_phewas_stats_in is not None else options.gene_phewas_bfs_in)
-
-    factor_gene_set_x_pheno = options.anchor_genes or options.anchor_any_gene or options.anchor_gene_set
-    use_phewas_for_factoring = options.anchor_phenos is not None or options.anchor_any_pheno or options.anchor_genes is not None or options.anchor_any_gene
-    expand_gene_sets = options.anchor_genes is not None and len(options.anchor_genes) > 1
+    factor_workflow = _classify_factor_workflow(options)
+    factor_type = factor_workflow["label"]
+    error = factor_workflow["error"]
+    factor_gene_set_x_pheno = factor_workflow["factor_gene_set_x_pheno"]
+    use_phewas_for_factoring = factor_workflow["use_phewas_for_factoring"]
+    expand_gene_sets = factor_workflow["expand_gene_sets"]
 
     if (options.add_gene_sets_by_enrichment_p is not None or options.add_gene_sets_by_fraction is not None or options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None) and not expand_gene_sets:
         warn("Ignoring options to add gene sets based on association with anchor genes because only 1 anchor gene was specified")
@@ -1006,7 +1039,7 @@ elif mode == "factor" or mode == "naive_factor": #run factoring, phewas factorin
     if error is not None:
         bail("Cannot run factoring type: %s. %s" % (factor_type, error))
     else:
-        log("Running factoring type: %s" % factor_type)
+        log("Running factoring type: %s [workflow=%s]" % (factor_type, factor_workflow["id"]))
 
     if ((use_phewas_for_factoring or factor_gene_set_x_pheno) and not options.anchor_gene_set) and (options.gene_set_stats_in or options.gwas_in or options.huge_statistics_in or options.exomes_in or options.positive_controls_in or options.positive_controls_list is not None or options.case_counts_in):
         if use_phewas_for_factoring:
@@ -1211,6 +1244,8 @@ if options.print_effective_config:
         "config": options.config,
         "options": _json_safe(vars(options)),
     }
+    if factor_workflow is not None:
+        effective_config["factor_workflow"] = _json_safe(factor_workflow)
     sys.stdout.write("%s\n" % json.dumps(effective_config, indent=2, sort_keys=True))
     sys.exit(0)
 
