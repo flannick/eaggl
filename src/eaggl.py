@@ -224,6 +224,7 @@ parser.add_option("","--gene-stats-log-bf-col",default=None,dest="gene_stats_log
 parser.add_option("","--gene-stats-combined-col",default=None,dest="gene_stats_combined_col")
 parser.add_option("","--gene-stats-prior-col",default=None,dest="gene_stats_prior_col")
 parser.add_option("","--gene-stats-prob-col",default=None,dest="gene_stats_prob_col")
+parser.add_option("","--eaggl-in",default=None) #read bundled PIGEAN outputs and use as default EAGGL inputs
 parser.add_option("","--const-gene-log-bf",default=None,type=float)
 
 #locations of genes
@@ -922,6 +923,106 @@ def _classify_factor_workflow(_options):
 
     return workflow
 
+
+_EAGGL_BUNDLE_SCHEMA = "pigean_eaggl_bundle/v1"
+_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS = set([
+    "X_in",
+    "gene_stats_in",
+    "gene_set_stats_in",
+    "gene_phewas_bfs_in",
+    "gene_set_phewas_stats_in",
+])
+_EAGGL_BUNDLE_TEMP_DIRS = []
+
+
+def _safe_extract_tar_to_temp(bundle_path):
+    tmp_dir = tempfile.mkdtemp(prefix="eaggl_bundle_in_")
+    try:
+        with tarfile.open(bundle_path, "r:*") as tar_fh:
+            members = tar_fh.getmembers()
+            for member in members:
+                member_name = member.name
+                if os.path.isabs(member_name) or ".." in member_name.replace("\\", "/").split("/"):
+                    bail("Refusing to read suspicious path in --eaggl-in bundle: %s" % member_name)
+            tar_fh.extractall(tmp_dir)
+    except Exception:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    _EAGGL_BUNDLE_TEMP_DIRS.append(tmp_dir)
+    return tmp_dir
+
+
+def _load_eaggl_bundle_inputs(bundle_path):
+    if not os.path.exists(bundle_path):
+        bail("Could not find --eaggl-in bundle %s" % bundle_path)
+
+    extract_dir = _safe_extract_tar_to_temp(bundle_path)
+    manifest_path = os.path.join(extract_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        bail("--eaggl-in bundle is missing manifest.json: %s" % bundle_path)
+
+    with open(manifest_path) as in_fh:
+        manifest = json.load(in_fh)
+    if not isinstance(manifest, dict):
+        bail("--eaggl-in manifest must be a JSON object: %s" % bundle_path)
+    if manifest.get("schema") != _EAGGL_BUNDLE_SCHEMA:
+        bail("Unsupported --eaggl-in schema '%s' in %s (expected %s)" % (manifest.get("schema"), bundle_path, _EAGGL_BUNDLE_SCHEMA))
+
+    raw_default_inputs = manifest.get("default_inputs")
+    if not isinstance(raw_default_inputs, dict):
+        bail("--eaggl-in manifest missing required object key 'default_inputs'")
+
+    resolved_default_inputs = {}
+    for key, rel_path in raw_default_inputs.items():
+        if key not in _EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS:
+            continue
+        if not isinstance(rel_path, str) or len(rel_path.strip()) == 0:
+            bail("Invalid bundle path for default input '%s'" % key)
+        joined = os.path.normpath(os.path.join(extract_dir, rel_path))
+        if not joined.startswith(os.path.abspath(extract_dir) + os.sep):
+            bail("Refusing to resolve path outside --eaggl-in bundle for key '%s': %s" % (key, rel_path))
+        if not os.path.exists(joined):
+            bail("--eaggl-in manifest path for '%s' does not exist: %s" % (key, rel_path))
+        resolved_default_inputs[key] = joined
+
+    return {
+        "bundle_path": bundle_path,
+        "extract_dir": extract_dir,
+        "schema": manifest.get("schema"),
+        "default_inputs": resolved_default_inputs,
+    }
+
+
+def _apply_eaggl_bundle_inputs(_options):
+    if _options.eaggl_in is None:
+        return None
+
+    bundle_info = _load_eaggl_bundle_inputs(_options.eaggl_in)
+    defaults = bundle_info["default_inputs"]
+    applied = {}
+
+    has_explicit_x_source = (
+        _options.X_in is not None
+        or _options.X_list is not None
+        or _options.Xd_in is not None
+        or _options.Xd_list is not None
+    )
+    if "X_in" in defaults and not has_explicit_x_source:
+        _options.X_in = [defaults["X_in"]]
+        applied["X_in"] = defaults["X_in"]
+
+    scalar_default_keys = ["gene_stats_in", "gene_set_stats_in", "gene_phewas_bfs_in", "gene_set_phewas_stats_in"]
+    for key in scalar_default_keys:
+        if key not in defaults:
+            continue
+        if getattr(_options, key) is None:
+            setattr(_options, key, defaults[key])
+            applied[key] = defaults[key]
+
+    bundle_info["applied_defaults"] = applied
+    return bundle_info
+
 _fail_removed_cli_aliases(sys.argv[1:])
 
 (options, args) = parser.parse_args()
@@ -962,6 +1063,15 @@ def warn(message):
         warnings_fh.write("Warning: %s\n" % message)
         warnings_fh.flush()
     log(message, level=INFO)
+
+eaggl_bundle_info = _apply_eaggl_bundle_inputs(options)
+if eaggl_bundle_info is not None:
+    applied = eaggl_bundle_info.get("applied_defaults", {})
+    if len(applied) == 0:
+        log("Loaded --eaggl-in bundle %s (no defaults applied; explicit CLI/config inputs took precedence)" % options.eaggl_in, INFO)
+    else:
+        applied_text = ", ".join(["%s=%s" % (k, applied[k]) for k in sorted(applied.keys())])
+        log("Loaded --eaggl-in bundle %s and applied defaults: %s" % (options.eaggl_in, applied_text), INFO)
 
 if options.deterministic and options.seed is None:
     options.seed = 0
@@ -1246,6 +1356,8 @@ if options.print_effective_config:
     }
     if factor_workflow is not None:
         effective_config["factor_workflow"] = _json_safe(factor_workflow)
+    if eaggl_bundle_info is not None:
+        effective_config["eaggl_bundle"] = _json_safe(eaggl_bundle_info)
     sys.stdout.write("%s\n" % json.dumps(effective_config, indent=2, sort_keys=True))
     sys.exit(0)
 
