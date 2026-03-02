@@ -19178,6 +19178,7 @@ def _build_main_mode_state():
         "use_phewas_for_factoring": use_phewas_for_factoring,
         "factor_gene_set_x_pheno": factor_gene_set_x_pheno,
         "expand_gene_sets": expand_gene_sets,
+        "factor_workflow": factor_workflow,
     }
 
 
@@ -19297,17 +19298,30 @@ def _load_main_y_inputs(g, options, mode_state, extend_for_gene):
 
 
 def _run_main_non_huge_pipeline(g, options, mode_state, sigma2_cond, Y_not_loaded):
+    run_huge = mode_state["run_huge"]
+    run_beta_tilde = mode_state["run_beta_tilde"]
+    run_beta = mode_state["run_beta"]
+    run_priors = mode_state["run_priors"]
+    run_naive_priors = mode_state["run_naive_priors"]
+    run_gibbs = mode_state["run_gibbs"]
+    run_factor = mode_state["run_factor"]
+    run_naive_factor = mode_state["run_naive_factor"]
+    run_sim = mode_state["run_sim"]
+    use_phewas_for_factoring = mode_state["use_phewas_for_factoring"]
+    factor_gene_set_x_pheno = mode_state["factor_gene_set_x_pheno"]
+    current_workflow = mode_state.get("factor_workflow")
+    workflow_id = current_workflow.get("id") if isinstance(current_workflow, dict) else None
+
     gene_set_ids = None
     if run_factor:
-        
-        #here we are only getting the IDs we'll keep
-        #it will save us time in reading in gene sets below in read_X since we can skip gene sets not in these files
-        if options.gene_set_stats_in is not None and not use_phewas_for_factoring:
-            gene_set_ids = g.read_gene_set_statistics(options.gene_set_stats_in, stats_id_col=options.gene_set_stats_id_col, stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col, stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col, stats_p_col=options.gene_set_stats_p_col, stats_se_col=options.gene_set_stats_se_col, stats_beta_col=options.gene_set_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col, ignore_negative_exp_beta=options.ignore_negative_exp_beta, max_gene_set_p=options.max_gene_set_read_p, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, return_only_ids=True)
-        elif use_phewas_for_factoring:
+        # Read IDs first so read_X can skip gene sets outside the selected strategy inputs.
+        factor_uses_phewas_gene_set_ids = workflow_id in set(["F4", "F5", "F6", "F7", "F8"])
+        if factor_uses_phewas_gene_set_ids:
             if options.gene_set_phewas_stats_in is None:
                 bail("Need --gene-set-phewas-stats-in")
             gene_set_ids = g.read_gene_set_phewas_statistics(options.gene_set_phewas_stats_in, stats_id_col=options.gene_set_phewas_stats_id_col, stats_pheno_col=options.gene_set_phewas_stats_pheno_col, stats_beta_col=options.gene_set_phewas_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, return_only_ids=True, phenos_to_match=options.anchor_phenos, max_num_entries_at_once=options.max_read_entries_at_once)
+        elif options.gene_set_stats_in is not None and not use_phewas_for_factoring:
+            gene_set_ids = g.read_gene_set_statistics(options.gene_set_stats_in, stats_id_col=options.gene_set_stats_id_col, stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col, stats_beta_tilde_col=options.gene_set_stats_beta_tilde_col, stats_p_col=options.gene_set_stats_p_col, stats_se_col=options.gene_set_stats_se_col, stats_beta_col=options.gene_set_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_stats_beta_uncorrected_col, ignore_negative_exp_beta=options.ignore_negative_exp_beta, max_gene_set_p=options.max_gene_set_read_p, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, return_only_ids=True)
 
         if gene_set_ids is not None:
             log("Will read %d gene sets" % (len(gene_set_ids)), DEBUG)
