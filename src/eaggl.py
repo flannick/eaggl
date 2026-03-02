@@ -19486,12 +19486,52 @@ def _write_main_primary_outputs(g, options):
         g.write_gene_effectors(options.gene_effectors_out)
 
 
+def _resolve_gene_phewas_input_for_stage(g, requested_input, reusable_inputs):
+    if requested_input is None:
+        return None
+    if not g.read_gene_phewas():
+        return requested_input
+    if g.num_gene_phewas_filtered != 0:
+        return requested_input
+    for candidate in reusable_inputs:
+        if candidate is not None and requested_input == candidate:
+            return None
+    return requested_input
+
+
+def _run_phewas_with_common_args(g, options, gene_phewas_bfs_in, run_for_factors=False, min_gene_factor_weight=0):
+    run_kwargs = {
+        "gene_phewas_bfs_in": gene_phewas_bfs_in,
+        "gene_phewas_bfs_id_col": options.gene_phewas_bfs_id_col,
+        "gene_phewas_bfs_pheno_col": options.gene_phewas_bfs_pheno_col,
+        "gene_phewas_bfs_log_bf_col": options.gene_phewas_bfs_log_bf_col,
+        "gene_phewas_bfs_combined_col": options.gene_phewas_bfs_combined_col,
+        "gene_phewas_bfs_prior_col": options.gene_phewas_bfs_prior_col,
+        "max_num_burn_in": options.max_num_burn_in,
+        "max_num_iter": options.max_num_iter_betas,
+        "min_num_iter": options.min_num_iter_betas,
+        "num_chains": options.num_chains_betas,
+        "r_threshold_burn_in": options.r_threshold_burn_in_betas,
+        "use_max_r_for_convergence": options.use_max_r_for_convergence_betas,
+        "max_frac_sem": options.max_frac_sem_betas,
+        "gauss_seidel": options.gauss_seidel_betas,
+        "sparse_solution": options.sparse_solution,
+        "sparse_frac_betas": options.sparse_frac_betas,
+    }
+    if run_for_factors:
+        run_kwargs["run_for_factors"] = True
+        run_kwargs["batch_size"] = 300
+        run_kwargs["min_gene_factor_weight"] = min_gene_factor_weight
+    g.run_phewas(**run_kwargs)
+
+
 def _run_main_phewas_stage(g, options):
-    bfs_to_use = options.run_phewas_from_gene_phewas_stats_in
-    if options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in and g.num_gene_phewas_filtered == 0 and g.read_gene_phewas():
-        # We can skip re-reading if the same unfiltered input file was already loaded.
-        bfs_to_use = None
-    g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas)
+    bfs_to_use = _resolve_gene_phewas_input_for_stage(
+        g,
+        options.run_phewas_from_gene_phewas_stats_in,
+        [options.gene_phewas_bfs_in],
+    )
+    _run_phewas_with_common_args(g, options, bfs_to_use, run_for_factors=False)
     if options.phewas_stats_out:
         g.write_phewas_statistics(options.phewas_stats_out)
 
@@ -19530,15 +19570,24 @@ def _write_main_factor_outputs(g, options):
 
 
 def _run_main_factor_phewas_stage(g, options):
-    if g.num_factors() > 0:
-        bfs_to_use = options.factor_phewas_from_gene_phewas_stats_in
-        if (options.gene_phewas_bfs_in is not None and bfs_to_use == options.gene_phewas_bfs_in) or (options.run_phewas_from_gene_phewas_stats_in is not None and bfs_to_use == options.run_phewas_from_gene_phewas_stats_in) and g.num_gene_phewas_filtered == 0:
-            bfs_to_use = None
-        g.run_phewas(gene_phewas_bfs_in=bfs_to_use,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, max_num_burn_in=options.max_num_burn_in, max_num_iter=options.max_num_iter_betas, min_num_iter=options.min_num_iter_betas, num_chains=options.num_chains_betas, r_threshold_burn_in=options.r_threshold_burn_in_betas, use_max_r_for_convergence=options.use_max_r_for_convergence_betas, max_frac_sem=options.max_frac_sem_betas, gauss_seidel=options.gauss_seidel_betas, sparse_solution=options.sparse_solution, sparse_frac_betas=options.sparse_frac_betas, run_for_factors=True, batch_size=300, min_gene_factor_weight=options.factor_phewas_min_gene_factor_weight)
-        if options.factor_phewas_stats_out:
-            g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
-    else:
+    if g.num_factors() <= 0:
         log("No factors; not performing factor phewas")
+        return
+
+    bfs_to_use = _resolve_gene_phewas_input_for_stage(
+        g,
+        options.factor_phewas_from_gene_phewas_stats_in,
+        [options.gene_phewas_bfs_in, options.run_phewas_from_gene_phewas_stats_in],
+    )
+    _run_phewas_with_common_args(
+        g,
+        options,
+        bfs_to_use,
+        run_for_factors=True,
+        min_gene_factor_weight=options.factor_phewas_min_gene_factor_weight,
+    )
+    if options.factor_phewas_stats_out:
+        g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
 
 def main():
 
