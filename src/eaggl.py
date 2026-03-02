@@ -989,6 +989,18 @@ def _warn_for_factor_workflow_inputs(_options, _workflow):
         warn("Ignoring all arguments for reading Y or reading betas in --anchor-genes mode")
 
 
+def _format_anchor_values_for_label(values):
+    if values is None:
+        return "None"
+    if isinstance(values, set):
+        values = sorted(list(values))
+    elif isinstance(values, (tuple, list)):
+        values = list(values)
+    else:
+        return str(values)
+    return "{%s}" % ", ".join(["'%s'" % x for x in values])
+
+
 def _classify_factor_workflow(_options):
     has_gene_set_phewas = _options.gene_set_phewas_stats_in is not None
     has_gene_phewas = _options.gene_phewas_bfs_in is not None
@@ -999,10 +1011,10 @@ def _classify_factor_workflow(_options):
 
     if _options.anchor_genes is not None and len(_options.anchor_genes) == 1:
         workflow_id = "F6"
-        workflow_label = "single gene anchoring (to %s)" % _options.anchor_genes
+        workflow_label = "single gene anchoring (to %s)" % _format_anchor_values_for_label(_options.anchor_genes)
     elif _options.anchor_genes is not None and len(_options.anchor_genes) > 1:
         workflow_id = "F7"
-        workflow_label = "multiple gene anchoring (to %s)" % _options.anchor_genes
+        workflow_label = "multiple gene anchoring (to %s)" % _format_anchor_values_for_label(_options.anchor_genes)
     elif _options.anchor_any_gene:
         workflow_id = "F8"
         workflow_label = "any gene anchoring"
@@ -1011,10 +1023,10 @@ def _classify_factor_workflow(_options):
         workflow_label = "gene set anchoring (to input phenotype/gene set)"
     elif _options.anchor_phenos is not None and len(_options.anchor_phenos) == 1:
         workflow_id = "F4"
-        workflow_label = "single phenotype anchoring (to %s) but with phewas statistics used" % _options.anchor_phenos
+        workflow_label = "single phenotype anchoring (to %s) but with phewas statistics used" % _format_anchor_values_for_label(_options.anchor_phenos)
     elif _options.anchor_phenos is not None and len(_options.anchor_phenos) > 1:
         workflow_id = "F4"
-        workflow_label = "multiple phenotype anchoring (to %s)" % _options.anchor_phenos
+        workflow_label = "multiple phenotype anchoring (to %s)" % _format_anchor_values_for_label(_options.anchor_phenos)
     elif _options.anchor_any_pheno:
         workflow_id = "F5"
         workflow_label = "any phenotype anchoring"

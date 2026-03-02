@@ -7,7 +7,7 @@
     "has_gene_phewas": true,
     "has_gene_set_phewas": true,
     "id": "F7",
-    "label": "multiple gene anchoring (to {'INS', 'GCK'})",
+    "label": "multiple gene anchoring (to {'GCK', 'INS'})",
     "missing_required_inputs": [],
     "required_inputs": [
       "--gene-set-phewas-stats-in",
