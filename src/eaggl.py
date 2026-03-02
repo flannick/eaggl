@@ -30,6 +30,9 @@ import random
 
 try:
     from .pegs_utils import (
+        collect_cli_specified_dests as pegs_collect_cli_specified_dests,
+        coerce_config_value as pegs_coerce_config_value,
+        iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
@@ -38,6 +41,9 @@ try:
     )
 except ImportError:
     from pegs_utils import (
+        collect_cli_specified_dests as pegs_collect_cli_specified_dests,
+        coerce_config_value as pegs_coerce_config_value,
+        iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
@@ -407,37 +413,11 @@ parser.add_option("","--debug-just-check-header",action="store_true") #
 parser.add_option("","--debug-only-avg-huge",action="store_true")
 
 def _iter_parser_options(_parser):
-    for _opt in _parser.option_list:
-        if _opt is not None and _opt.dest is not None:
-            yield _opt
-    for _group in _parser.option_groups:
-        for _opt in _group.option_list:
-            if _opt is not None and _opt.dest is not None:
-                yield _opt
+    for _opt in pegs_iter_parser_options(_parser):
+        yield _opt
 
 def _collect_cli_specified_dests(_argv, _parser):
-    option_lookup = {}
-    for _opt in _iter_parser_options(_parser):
-        for _long_opt in _opt._long_opts:
-            option_lookup[_long_opt] = _opt
-
-    specified_dests = set()
-    i = 0
-    while i < len(_argv):
-        arg = _argv[i]
-        if arg == "--":
-            break
-        if arg.startswith("--"):
-            opt_token = arg.split("=", 1)[0]
-            if opt_token in option_lookup:
-                opt_obj = option_lookup[opt_token]
-                if opt_obj.dest is not None:
-                    specified_dests.add(opt_obj.dest)
-                if "=" not in arg and opt_obj.takes_value() and i + 1 < len(_argv):
-                    i += 1
-        i += 1
-
-    return specified_dests
+    return pegs_collect_cli_specified_dests(_argv, _parser)
 
 def _merge_dicts(_base, _override):
     return pegs_merge_dicts(_base, _override)
@@ -458,34 +438,7 @@ def _resolve_config_path_value(_value, _config_dir):
     return pegs_resolve_config_path_value(_value, _config_dir)
 
 def _coerce_config_value(_opt, _value):
-    def _cast_scalar(_scalar):
-        if _scalar is None:
-            return None
-        if _opt.type == "int":
-            return int(_scalar)
-        if _opt.type == "float":
-            return float(_scalar)
-        return _scalar
-
-    if _opt.action == "append":
-        values = _value if isinstance(_value, list) else [_value]
-        return [_cast_scalar(v) for v in values]
-
-    if _opt.action in ("store_true", "store_false"):
-        if isinstance(_value, bool):
-            return _value
-        if isinstance(_value, str):
-            lower = _value.strip().lower()
-            if lower in ("1", "true", "yes", "y", "on"):
-                return True
-            if lower in ("0", "false", "no", "n", "off"):
-                return False
-        bail("Config value for %s must be boolean" % (_opt.dest))
-
-    if _opt.action == "callback":
-        return _value
-
-    return _cast_scalar(_value)
+    return pegs_coerce_config_value(_opt, _value, bail_fn=bail)
 
 def _early_warn(_message):
     sys.stderr.write("Warning: %s\n" % _message)
