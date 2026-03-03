@@ -34,6 +34,8 @@ try:
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         assign_default_batches as pegs_assign_default_batches,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
+        initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
+        maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
         prepare_read_x_inputs as pegs_prepare_read_x_inputs,
         load_aligned_gene_bfs as pegs_load_aligned_gene_bfs,
         load_aligned_gene_covariates as pegs_load_aligned_gene_covariates,
@@ -79,6 +81,8 @@ except ImportError:
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         assign_default_batches as pegs_assign_default_batches,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
+        initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
+        maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
         prepare_read_x_inputs as pegs_prepare_read_x_inputs,
         load_aligned_gene_bfs as pegs_load_aligned_gene_bfs,
         load_aligned_gene_covariates as pegs_load_aligned_gene_covariates,
@@ -1766,52 +1770,16 @@ class EagglState(object):
         )
 
         if (filter_gene_set_p < 1 or filter_gene_set_metric_z) and self.Y is not None:
-            self.gene_sets_ignored = []
-            if self.gene_set_labels is not None:
-                self.gene_set_labels_ignored = np.array([])
-
-            self.col_sums_ignored = np.array([])
-            self.scale_factors_ignored = np.array([])
-            self.mean_shifts_ignored = np.array([])
-            self.beta_tildes_ignored = np.array([])
-            self.p_values_ignored = np.array([])
-            self.ses_ignored = np.array([])
-            self.z_scores_ignored = np.array([])
-            self.se_inflation_factors_ignored = np.array([])
-
-
-            self.beta_tildes = np.array([])
-            self.p_values = np.array([])
-            self.ses = np.array([])
-            self.z_scores = np.array([])
-
-            self.se_inflation_factors = None
-
-            self.total_qc_metrics = None
-            self.mean_qc_metrics = None
-
-            self.total_qc_metrics_missing = None
-            self.mean_qc_metrics_missing = None
-
-            self.total_qc_metrics_ignored = None
-            self.mean_qc_metrics_ignored = None
-
-            self.total_qc_metrics_directions = None
-
-            self.sigma2s = None
-            self.sigma2s_missing = None
-            if update_hyper_p is not None:
-                self.ps = np.array([])
-            else:
-                self.ps = None
-            self.ps_missing = None
-
-            if (run_gls or run_corrected_ols) and self.y_corr is None:
-                correlation_m = self._read_correlations(gene_cor_file, gene_loc_file, gene_cor_file_gene_col=gene_cor_file_gene_col, gene_cor_file_cor_start_col=gene_cor_file_cor_start_col)
-
-                #convert X and Y to their new values
-                min_correlation = 0.05
-                self._set_Y(self.Y, self.Y_for_regression, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts, Y_corr_m=correlation_m, store_cholesky=run_gls, store_corr_sparse=run_corrected_ols, skip_V=True, skip_scale_factors=True, min_correlation=min_correlation)
+            pegs_initialize_filtered_gene_set_state(self, update_hyper_p=update_hyper_p)
+            pegs_maybe_prepare_filtered_gls_correlation(
+                runtime=self,
+                run_gls=run_gls,
+                run_corrected_ols=run_corrected_ols,
+                gene_cor_file=gene_cor_file,
+                gene_loc_file=gene_loc_file,
+                gene_cor_file_gene_col=gene_cor_file_gene_col,
+                gene_cor_file_cor_start_col=gene_cor_file_cor_start_col,
+            )
 
         if not run_logistic and self.Y_for_regression is not None and np.max(np.exp(self.Y_for_regression + self.background_log_bf) / (1 + np.exp(self.Y_for_regression + self.background_log_bf))) > max_for_linear:
             log("Switching to logistic sampling due to high Y values", DEBUG)
