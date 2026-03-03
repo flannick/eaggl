@@ -38,8 +38,12 @@ try:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
+        load_bundle_manifest as pegs_load_bundle_manifest,
         merge_dicts as pegs_merge_dicts,
+        resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+        EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
 except ImportError:
     from pegs_utils import (
@@ -51,8 +55,12 @@ except ImportError:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
+        load_bundle_manifest as pegs_load_bundle_manifest,
         merge_dicts as pegs_merge_dicts,
+        resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+        EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
 
 random.seed(0)
@@ -726,72 +734,29 @@ def _classify_factor_workflow(_options):
     return workflow
 
 
-_EAGGL_BUNDLE_SCHEMA = "pigean_eaggl_bundle/v1"
-_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS = set([
-    "X_in",
-    "gene_stats_in",
-    "gene_set_stats_in",
-    "gene_phewas_bfs_in",
-    "gene_set_phewas_stats_in",
-])
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
-
-def _safe_extract_tar_to_temp(bundle_path):
-    tmp_dir = tempfile.mkdtemp(prefix="eaggl_bundle_in_")
-    try:
-        with tarfile.open(bundle_path, "r:*") as tar_fh:
-            members = tar_fh.getmembers()
-            for member in members:
-                member_name = member.name
-                if os.path.isabs(member_name) or ".." in member_name.replace("\\", "/").split("/"):
-                    bail("Refusing to read suspicious path in --eaggl-bundle-in bundle: %s" % member_name)
-            tar_fh.extractall(tmp_dir)
-    except Exception:
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-    _EAGGL_BUNDLE_TEMP_DIRS.append(tmp_dir)
-    return tmp_dir
-
-
 def _load_eaggl_bundle_inputs(bundle_path):
-    if not os.path.exists(bundle_path):
-        bail("Could not find --eaggl-bundle-in bundle %s" % bundle_path)
-
-    extract_dir = _safe_extract_tar_to_temp(bundle_path)
-    manifest_path = os.path.join(extract_dir, "manifest.json")
-    if not os.path.exists(manifest_path):
-        bail("--eaggl-bundle-in bundle is missing manifest.json: %s" % bundle_path)
-
-    with open(manifest_path) as in_fh:
-        manifest = json.load(in_fh)
-    if not isinstance(manifest, dict):
-        bail("--eaggl-bundle-in manifest must be a JSON object: %s" % bundle_path)
-    if manifest.get("schema") != _EAGGL_BUNDLE_SCHEMA:
-        bail("Unsupported --eaggl-bundle-in schema '%s' in %s (expected %s)" % (manifest.get("schema"), bundle_path, _EAGGL_BUNDLE_SCHEMA))
-
-    raw_default_inputs = manifest.get("default_inputs")
-    if not isinstance(raw_default_inputs, dict):
-        bail("--eaggl-bundle-in manifest missing required object key 'default_inputs'")
-
-    resolved_default_inputs = {}
-    for key, rel_path in raw_default_inputs.items():
-        if key not in _EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS:
-            continue
-        if not isinstance(rel_path, str) or len(rel_path.strip()) == 0:
-            bail("Invalid bundle path for default input '%s'" % key)
-        joined = os.path.normpath(os.path.join(extract_dir, rel_path))
-        if not joined.startswith(os.path.abspath(extract_dir) + os.sep):
-            bail("Refusing to resolve path outside --eaggl-bundle-in bundle for key '%s': %s" % (key, rel_path))
-        if not os.path.exists(joined):
-            bail("--eaggl-bundle-in manifest path for '%s' does not exist: %s" % (key, rel_path))
-        resolved_default_inputs[key] = joined
+    extract_dir, manifest = pegs_load_bundle_manifest(
+        bundle_path,
+        PEGS_EAGGL_BUNDLE_SCHEMA,
+        bundle_flag_name="--eaggl-bundle-in",
+        temp_prefix="eaggl_bundle_in_",
+        bail_fn=bail,
+    )
+    _EAGGL_BUNDLE_TEMP_DIRS.append(extract_dir)
+    resolved_default_inputs = pegs_resolve_bundle_default_inputs(
+        manifest.get("default_inputs"),
+        extract_dir,
+        PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+        bundle_flag_name="--eaggl-bundle-in",
+        bail_fn=bail,
+    )
 
     return {
         "bundle_path": bundle_path,
         "extract_dir": extract_dir,
-        "schema": manifest.get("schema"),
+        "schema": PEGS_EAGGL_BUNDLE_SCHEMA,
         "default_inputs": resolved_default_inputs,
     }
 
