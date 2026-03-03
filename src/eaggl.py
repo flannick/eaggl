@@ -41,11 +41,9 @@ try:
         apply_parsed_gene_set_statistics_to_runtime as pegs_apply_parsed_gene_set_statistics_to_runtime,
         set_runtime_p as pegs_set_runtime_p,
         set_runtime_sigma as pegs_set_runtime_sigma,
-        y_data_from_runtime as pegs_y_data_from_runtime,
-        apply_y_data_to_runtime as pegs_apply_y_data_to_runtime,
-        hyperparameter_data_from_runtime as pegs_hyperparameter_data_from_runtime,
-        phewas_runtime_state_from_runtime as pegs_phewas_runtime_state_from_runtime,
-        apply_phewas_runtime_state_to_runtime as pegs_apply_phewas_runtime_state_to_runtime,
+        sync_y_state as pegs_sync_y_state,
+        sync_hyperparameter_state as pegs_sync_hyperparameter_state,
+        sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
@@ -85,11 +83,9 @@ except ImportError:
         apply_parsed_gene_set_statistics_to_runtime as pegs_apply_parsed_gene_set_statistics_to_runtime,
         set_runtime_p as pegs_set_runtime_p,
         set_runtime_sigma as pegs_set_runtime_sigma,
-        y_data_from_runtime as pegs_y_data_from_runtime,
-        apply_y_data_to_runtime as pegs_apply_y_data_to_runtime,
-        hyperparameter_data_from_runtime as pegs_hyperparameter_data_from_runtime,
-        phewas_runtime_state_from_runtime as pegs_phewas_runtime_state_from_runtime,
-        apply_phewas_runtime_state_to_runtime as pegs_apply_phewas_runtime_state_to_runtime,
+        sync_y_state as pegs_sync_y_state,
+        sync_hyperparameter_state as pegs_sync_hyperparameter_state,
+        sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
@@ -1493,9 +1489,9 @@ class EagglState(object):
         self.factor_phewas_combined_prior_Ys_huber_p_values = None #phewas statistics
         self.factor_phewas_combined_prior_Ys_huber_one_sided_p_values = None #phewas statistics
 
-        self.y_state = pegs_y_data_from_runtime(self)
-        self.hyperparameter_state = pegs_hyperparameter_data_from_runtime(self)
-        self.phewas_state = pegs_phewas_runtime_state_from_runtime(self)
+        self.y_state = pegs_sync_y_state(self)
+        self.hyperparameter_state = pegs_sync_hyperparameter_state(self)
+        self.phewas_state = pegs_sync_phewas_runtime_state(self)
 
     def init_gene_locs(self, gene_loc_file):
         log("Reading --gene-loc-file %s" % gene_loc_file)
@@ -3472,8 +3468,7 @@ class EagglState(object):
             bail_fn=bail,
             log_fn=lambda message: log(message, DEBUG),
         )
-        self.phewas_state = pegs_phewas_runtime_state_from_runtime(self)
-        pegs_apply_phewas_runtime_state_to_runtime(self, self.phewas_state)
+        self.phewas_state = pegs_sync_phewas_runtime_state(self)
 
 
     def has_gene_sets(self):
@@ -9216,8 +9211,7 @@ class EagglState(object):
         self.Y_exomes = Y_exomes
         self.Y_positive_controls = Y_positive_controls
         self.Y_case_counts = Y_case_counts
-        self.y_state = pegs_y_data_from_runtime(self)
-        pegs_apply_y_data_to_runtime(self, self.y_state)
+        self.y_state = pegs_sync_y_state(self)
 
     def _get_y_corr_cholesky(self, Y_corr_m):
         Y_corr_m_copy = copy.copy(Y_corr_m)
