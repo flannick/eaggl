@@ -2382,7 +2382,7 @@ class EagglState(object):
             num_gene_sets = 0
             for i in range(len(X_ins)):
                 X_in = X_ins[i]
-                (X_in, tag) = remove_tag(X_in)
+                (X_in, tag) = _remove_tag_from_input(X_in)
 
                 if is_dense[i]:
                     with open_gz(X_in) as gene_sets_fh:
@@ -2470,244 +2470,35 @@ class EagglState(object):
             #really calling this just to set the genes
             self._set_X(self.X_orig, list(all_genes), self.gene_sets, skip_N=False)
 
+        ignored_for_fraction_inc = 0
         for i in range(len(X_ins)):
             X_in = X_ins[i]
-            (X_in, tag) = remove_tag(X_in)
+            (X_in, tag) = _remove_tag_from_input(X_in)
 
             log("Reading X %d of %d from --X-in file %s" % (i+1,len(X_ins),X_in), INFO)
 
-            num_too_small = 0
-
-            genes = []
-            gene_sets = []
-            cur_X = None
-
-            ignored_for_fraction_inc = 0
-
-            if is_dense[i]:
-                with open_gz(X_in) as gene_sets_fh:
-                    header = gene_sets_fh.readline().strip('\n')
-                    header = header.lstrip("# \t")
-                    gene_sets = header.split()
-                    if len(gene_sets) < 2:
-                        warn("First line of --Xd-in %s must contain gene column followed by list of gene sets; skipping file" % X_in)
-                        continue
-                    #if header[0] != "#":
-                    #    warn("Assuming first line is header line despite lack of #; first characters are '%s...'" % header[:10])
-
-                    #first column is genes so split
-                    gene_sets = gene_sets[1:]
-
-                    #maximum number of sets to avoid memory overflow
-                    max_num_at_once = 500
-                    if only_ids and len(only_ids) < len(gene_sets):
-                        #estimate fraction
-                        max_num_at_once = int(max_num_at_once / (float(len(only_ids)) / len(gene_sets)))
-
-                    if len(gene_sets) > max_num_at_once:
-                        log("Splitting reading of file into chunks to limit memory", DEBUG)
-                    for j in range(0, len(gene_sets), max_num_at_once):
-                        if len(gene_sets) > max_num_at_once:
-                            log("Reading gene sets %d-%d" % (j+1, j+min(len(gene_sets), j+max_num_at_once+1)), DEBUG)
-
-                        gene_set_indices_to_load = list(range(j, min(len(gene_sets), j+max_num_at_once)))
-
-                        if only_ids is not None:
-                            gene_set_mask = np.full(len(gene_set_indices_to_load), False)
-                            for k in range(len(gene_set_mask)):
-                                if gene_sets[gene_set_indices_to_load[k]] in only_ids:
-                                    gene_set_mask[k] = True
-                                elif x_sparsify is not None:
-                                    for top_number in x_sparsify:
-                                        for sparse_tag in [EXT_TAG, TOP_TAG, BOT_TAG]:
-                                            if "%s_%s%d" % (gene_sets[gene_set_indices_to_load[k]], sparse_tag, top_number) in only_ids:
-                                                gene_set_mask[k] = True
-                                                break
-
-                            if np.any(gene_set_mask):
-                                gene_set_indices_to_load = [gene_set_indices_to_load[i] for i in range(len(gene_set_mask)) if gene_set_mask[i]]
-                                log("Will load %d gene sets that were requested" % (np.sum(gene_set_mask)), TRACE)
-                            else:
-                                continue
-
-                        indices_to_load = [0] + [k+1 for k in gene_set_indices_to_load]
-
-                        cur_X = np.loadtxt(X_in, skiprows=1, dtype=str, usecols=indices_to_load)
-
-                        if len(cur_X.shape) == 1:
-                            cur_X = cur_X[:,np.newaxis]
-
-                        if cur_X.shape[1] != len(indices_to_load):
-                            bail("Xd matrix %s dimensions %s do not match number of gene sets in header line (%s)" % (X_in, cur_X.shape, len(gene_sets)))
-                        cur_gene_sets = [gene_sets[k] for k in gene_set_indices_to_load]
-
-                        genes = cur_X[:,0]
-                        if self.gene_label_map is not None:
-                            genes = list(map(lambda x: self.gene_label_map[x] if x in self.gene_label_map else x, genes))
-
-                        cur_X = cur_X[:,1:].astype(float)
-                        mat_info = cur_X
-
-                        num_added, num_ignored = __add_to_X(mat_info, genes, cur_gene_sets, tag, skip_scale_factors=False)
-                        if i == 0 and num_added + num_ignored == 0:
-                            bail("--first-for-hyper was specified but first file had no gene sets")
-                        #add gene set batches here
-                        self.gene_set_batches = np.append(self.gene_set_batches, np.full(num_added, batches[i]))
-                        self.gene_set_labels = np.append(self.gene_set_labels, np.full(num_added, labels[i]))
-                        if self.ps is not None and initial_ps is not None:
-                            self.ps = np.append(self.ps, np.full(num_added, initial_ps[i]))                            
-                        self.gene_set_labels_ignored = np.append(self.gene_set_labels_ignored, np.full(num_ignored, labels[i]))
-                        num_ignored_gene_sets[i] += num_ignored
-
-            else:
-
-                data = []
-                row = []
-                col = []
-                num_read = 0
-
-                new_gene_to_ind = {}
-                gene_set_to_ind = {}
-                gene_to_ind = None
-                if self.genes is not None:
-                    #ensure that the matrix always contains all of the current genes
-                    #this simplifies code in add_to_X
-                    genes = copy.copy(self.genes)
-                    if self.genes_missing is not None:
-                        genes += self.genes_missing
-                    gene_to_ind = self._construct_map_to_ind(genes)
-
-                with open_gz(X_in) as gene_sets_fh:
-
-                    if max_num_entries_at_once is None:
-                        max_num_entries_at_once = 200 * 10000
-                    cur_num_read = 0
-
-                    already_seen = 0
-                    for line in gene_sets_fh:
-                        line = line.strip('\n')
-                        cols = line.split()
-
-                        if len(cols) < 2:
-                            warn("Line does not match format for --X-in: %s" % (line))
-                            continue
-                        gs = cols[0]
-
-                        if only_ids is not None and gs not in only_ids:
-                            continue
-
-                        if gs in gene_set_to_ind or (self.gene_set_to_ind is not None and gs in self.gene_set_to_ind):
-                            already_seen += 1
-                            continue
-
-                        cur_genes = set(cols[1:])
-                        if self.gene_label_map is not None:
-                            cur_genes = set(map(lambda x: self.gene_label_map[x] if x in self.gene_label_map else x, cur_genes))
-
-                        if len(cur_genes) < min_gene_set_size:
-                            #avoid too small gene sets
-                            num_too_small += 1
-                            continue
-
-                        #initialize a new location for the gene set
-                        gene_set_ind = len(gene_sets)
-                        gene_sets.append(gs)
-                        #add this to track duplicates in input file
-                        gene_set_to_ind[gs] = gene_set_ind
-
-                        if only_inc_genes is not None:
-                            fraction_match = len(only_inc_genes.intersection(cur_genes)) / float(len(only_inc_genes))
-                            if fraction_match < (fraction_inc_genes if fraction_inc_genes is not None else 1e-5):
-                                ignored_for_fraction_inc += 1
-                                continue
-
-                        for gene in cur_genes:
-
-                            gene_array = gene.split(":")
-                            gene = gene_array[0]
-                            if gene in ignore_genes:
-                                continue
-                            if len(gene_array) == 2:
-                                try:
-                                    weight = float(gene_array[1])
-                                except ValueError:
-                                    #skip this line
-                                    warn("Couldn't convert weight %s to number so skipping token: %s" % (weight, ":".join(gene_array)))
-                                    continue
-                            else:
-                                weight = 1.0
-
-                            if gene_to_ind is not None and gene in gene_to_ind:
-                                #keep this gene when we harmonize at the end
-                                gene_ind = gene_to_ind[gene]
-                            else:
-                                if gene not in new_gene_to_ind:
-                                    gene_ind = len(new_gene_to_ind)                                
-                                    if gene_to_ind is not None:
-                                        gene_ind += len(gene_to_ind)
-
-                                    new_gene_to_ind[gene] = gene_ind
-                                    genes.append(gene)
-                                else:
-                                    gene_ind = new_gene_to_ind[gene]
-
-                            #store data for the later matrices
-                            col.append(gene_set_ind)
-                            row.append(gene_ind)
-                            data.append(weight)
-                        num_read += 1
-                        cur_num_read += 1
-
-                        #add at end or when have hit maximum
-                        if len(data) >= max_num_entries_at_once:
-                            log("Batching %d lines to save memory" % cur_num_read)
-                            num_added, num_ignored = __add_to_X((data, row, col), genes, gene_sets, tag, skip_scale_factors=False)
-                            if i == 0 and num_added + num_ignored == 0:
-                                bail("--first-for-hyper was specified but first file had no gene sets")
-                            #add gene set batches here
-                            self.gene_set_batches = np.append(self.gene_set_batches, np.full(num_added, batches[i]))
-                            self.gene_set_labels = np.append(self.gene_set_labels, np.full(num_added, labels[i]))
-                            self.gene_set_labels_ignored = np.append(self.gene_set_labels_ignored, np.full(num_ignored, labels[i]))
-                            if self.ps is not None and initial_ps is not None:
-                                self.ps = np.append(self.ps, np.full(num_added, initial_ps[i]))  
-
-                            num_ignored_gene_sets[i] += num_ignored
-
-                            #re-initialize things
-                            genes = copy.copy(self.genes)
-                            if self.genes_missing is not None:
-                                genes += self.genes_missing
-                            gene_to_ind = self._construct_map_to_ind(genes)
-                            new_gene_to_ind = {}
-                            gene_sets = []
-                            data = []
-                            row = []
-                            col = []
-                            num_read = 0
-                            cur_num_read = 0
-                            log("Continuing reading...")
-                    #get the end if there are any
-
-                    if already_seen > 0:
-                        warn("Skipped second occurrence of %d repeated gene sets" % already_seen)
-
-                    if len(data) > 0:
-                        mat_info = (data, row, col)
-                    else:
-                        mat_info = None
-
-                if mat_info is not None:
-
-                    num_added, num_ignored = __add_to_X(mat_info, genes, gene_sets, tag, skip_scale_factors=False)
-                    if i == 0 and num_added + num_ignored == 0:
-                        bail("--first-for-hyper was specified but first file had no gene sets")
-                    #add gene set batches here
-                    self.gene_set_batches = np.append(self.gene_set_batches, np.full(num_added, batches[i]))
-                    self.gene_set_labels = np.append(self.gene_set_labels, np.full(num_added, labels[i]))
-                    self.gene_set_labels_ignored = np.append(self.gene_set_labels_ignored, np.full(num_ignored, labels[i]))
-                    num_ignored_gene_sets[i] += num_ignored
-                    if self.ps is not None and initial_ps is not None:
-                        self.ps = np.append(self.ps, np.full(num_added, initial_ps[i]))  
+            num_too_small, ignored_for_fraction_inc, processed_input = _process_x_input_file(
+                self,
+                X_in=X_in,
+                tag=tag,
+                is_dense_input=is_dense[i],
+                only_ids=only_ids,
+                x_sparsify=x_sparsify,
+                sparse_tags=[EXT_TAG, TOP_TAG, BOT_TAG],
+                batch_value=batches[i],
+                label_value=labels[i],
+                initial_p_value=initial_ps[i] if initial_ps is not None else None,
+                num_ignored_gene_sets=num_ignored_gene_sets,
+                input_index=i,
+                add_to_x_fn=__add_to_X,
+                min_gene_set_size=min_gene_set_size,
+                only_inc_genes=only_inc_genes,
+                fraction_inc_genes=fraction_inc_genes,
+                ignore_genes=ignore_genes,
+                max_num_entries_at_once=max_num_entries_at_once,
+            )
+            if not processed_input:
+                continue
 
             log("Ignored %d gene sets due to too few genes" % num_too_small, DEBUG)
 
@@ -10275,6 +10066,370 @@ def _run_main_factor_phewas_stage(g, options):
 
 def _should_run_main_factor_phewas_stage(mode_state):
     return bool(mode_state["run_factor"] and mode_state["run_factor_phewas"])
+
+
+def _remove_tag_from_input(x_in, tag_separator=':'):
+    return pegs_remove_tag_from_input(x_in, tag_separator=tag_separator)
+
+
+def _estimate_dense_chunk_size(gene_set_count, only_ids, default_chunk_size=500):
+    max_num_at_once = default_chunk_size
+    if only_ids and len(only_ids) < gene_set_count:
+        max_num_at_once = int(max_num_at_once / (float(len(only_ids)) / gene_set_count))
+    return max_num_at_once
+
+
+def _record_x_addition(
+    runtime_state,
+    num_added,
+    num_ignored,
+    batch_value,
+    label_value,
+    initial_p_value,
+    num_ignored_gene_sets,
+    input_index,
+    fail_if_first_empty=False,
+):
+    if fail_if_first_empty and num_added + num_ignored == 0:
+        bail("--first-for-hyper was specified but first file had no gene sets")
+
+    runtime_state.gene_set_batches = np.append(runtime_state.gene_set_batches, np.full(num_added, batch_value))
+    runtime_state.gene_set_labels = np.append(runtime_state.gene_set_labels, np.full(num_added, label_value))
+    if runtime_state.ps is not None and initial_p_value is not None:
+        runtime_state.ps = np.append(runtime_state.ps, np.full(num_added, initial_p_value))
+    runtime_state.gene_set_labels_ignored = np.append(runtime_state.gene_set_labels_ignored, np.full(num_ignored, label_value))
+    num_ignored_gene_sets[input_index] += num_ignored
+
+
+def _filter_dense_chunk_gene_set_indices(gene_sets, chunk_indices, only_ids, x_sparsify, sparse_tags):
+    if only_ids is None:
+        return chunk_indices
+
+    gene_set_mask = np.full(len(chunk_indices), False)
+    for idx_in_chunk in range(len(gene_set_mask)):
+        gene_set_name = gene_sets[chunk_indices[idx_in_chunk]]
+        if gene_set_name in only_ids:
+            gene_set_mask[idx_in_chunk] = True
+        elif x_sparsify is not None:
+            for top_number in x_sparsify:
+                for sparse_tag in sparse_tags:
+                    if "%s_%s%d" % (gene_set_name, sparse_tag, top_number) in only_ids:
+                        gene_set_mask[idx_in_chunk] = True
+                        break
+                if gene_set_mask[idx_in_chunk]:
+                    break
+
+    if np.any(gene_set_mask):
+        return [chunk_indices[i] for i in range(len(gene_set_mask)) if gene_set_mask[i]]
+    return []
+
+
+def _init_sparse_x_batch_state(runtime_state):
+    genes = []
+    gene_to_ind = None
+    if runtime_state.genes is not None:
+        genes = copy.copy(runtime_state.genes)
+        if runtime_state.genes_missing is not None:
+            genes += runtime_state.genes_missing
+        gene_to_ind = runtime_state._construct_map_to_ind(genes)
+
+    return (
+        genes,
+        gene_to_ind,
+        {},
+        [],
+        [],
+        [],
+        [],
+        0,
+        0,
+    )
+
+
+def _process_dense_x_file(
+    runtime_state,
+    X_in,
+    tag,
+    only_ids,
+    x_sparsify,
+    sparse_tags,
+    batch_value,
+    label_value,
+    initial_p_value,
+    num_ignored_gene_sets,
+    input_index,
+    add_to_x_fn,
+):
+    with open_gz(X_in) as gene_sets_fh:
+        header = gene_sets_fh.readline().strip('\n')
+        header = header.lstrip("# \t")
+        gene_sets = header.split()
+        if len(gene_sets) < 2:
+            warn("First line of --Xd-in %s must contain gene column followed by list of gene sets; skipping file" % X_in)
+            return False
+
+        gene_sets = gene_sets[1:]
+        max_num_at_once = _estimate_dense_chunk_size(len(gene_sets), only_ids=only_ids, default_chunk_size=500)
+
+        if len(gene_sets) > max_num_at_once:
+            log("Splitting reading of file into chunks to limit memory", DEBUG)
+        for j in range(0, len(gene_sets), max_num_at_once):
+            if len(gene_sets) > max_num_at_once:
+                log("Reading gene sets %d-%d" % (j + 1, j + min(len(gene_sets), j + max_num_at_once + 1)), DEBUG)
+
+            gene_set_indices_to_load = list(range(j, min(len(gene_sets), j + max_num_at_once)))
+            gene_set_indices_to_load = _filter_dense_chunk_gene_set_indices(
+                gene_sets,
+                chunk_indices=gene_set_indices_to_load,
+                only_ids=only_ids,
+                x_sparsify=x_sparsify,
+                sparse_tags=sparse_tags,
+            )
+            if only_ids is not None:
+                if len(gene_set_indices_to_load) > 0:
+                    log("Will load %d gene sets that were requested" % len(gene_set_indices_to_load), TRACE)
+                else:
+                    continue
+
+            indices_to_load = [0] + [k + 1 for k in gene_set_indices_to_load]
+            cur_X = np.loadtxt(X_in, skiprows=1, dtype=str, usecols=indices_to_load)
+            if len(cur_X.shape) == 1:
+                cur_X = cur_X[:, np.newaxis]
+
+            if cur_X.shape[1] != len(indices_to_load):
+                bail("Xd matrix %s dimensions %s do not match number of gene sets in header line (%s)" % (X_in, cur_X.shape, len(gene_sets)))
+            cur_gene_sets = [gene_sets[k] for k in gene_set_indices_to_load]
+
+            genes = cur_X[:, 0]
+            if runtime_state.gene_label_map is not None:
+                genes = list(map(lambda x: runtime_state.gene_label_map[x] if x in runtime_state.gene_label_map else x, genes))
+
+            mat_info = cur_X[:, 1:].astype(float)
+            num_added, num_ignored = add_to_x_fn(mat_info, genes, cur_gene_sets, tag, skip_scale_factors=False)
+            _record_x_addition(
+                runtime_state,
+                num_added=num_added,
+                num_ignored=num_ignored,
+                batch_value=batch_value,
+                label_value=label_value,
+                initial_p_value=initial_p_value,
+                num_ignored_gene_sets=num_ignored_gene_sets,
+                input_index=input_index,
+                fail_if_first_empty=(input_index == 0),
+            )
+    return True
+
+
+def _process_sparse_x_file(
+    runtime_state,
+    X_in,
+    tag,
+    only_ids,
+    min_gene_set_size,
+    only_inc_genes,
+    fraction_inc_genes,
+    ignore_genes,
+    max_num_entries_at_once,
+    batch_value,
+    label_value,
+    initial_p_value,
+    num_ignored_gene_sets,
+    input_index,
+    add_to_x_fn,
+):
+    (
+        genes,
+        gene_to_ind,
+        new_gene_to_ind,
+        gene_sets,
+        data,
+        row,
+        col,
+        num_read,
+        cur_num_read,
+    ) = _init_sparse_x_batch_state(runtime_state)
+    gene_set_to_ind = {}
+    num_too_small = 0
+    ignored_for_fraction_inc = 0
+
+    with open_gz(X_in) as gene_sets_fh:
+        if max_num_entries_at_once is None:
+            max_num_entries_at_once = 200 * 10000
+
+        already_seen = 0
+        for line in gene_sets_fh:
+            line = line.strip('\n')
+            cols = line.split()
+            if len(cols) < 2:
+                warn("Line does not match format for --X-in: %s" % (line))
+                continue
+            gs = cols[0]
+
+            if only_ids is not None and gs not in only_ids:
+                continue
+            if gs in gene_set_to_ind or (runtime_state.gene_set_to_ind is not None and gs in runtime_state.gene_set_to_ind):
+                already_seen += 1
+                continue
+
+            cur_genes = set(cols[1:])
+            if runtime_state.gene_label_map is not None:
+                cur_genes = set(map(lambda x: runtime_state.gene_label_map[x] if x in runtime_state.gene_label_map else x, cur_genes))
+
+            if len(cur_genes) < min_gene_set_size:
+                num_too_small += 1
+                continue
+
+            gene_set_ind = len(gene_sets)
+            gene_sets.append(gs)
+            gene_set_to_ind[gs] = gene_set_ind
+
+            if only_inc_genes is not None:
+                fraction_match = len(only_inc_genes.intersection(cur_genes)) / float(len(only_inc_genes))
+                if fraction_match < (fraction_inc_genes if fraction_inc_genes is not None else 1e-5):
+                    ignored_for_fraction_inc += 1
+                    continue
+
+            for gene in cur_genes:
+                gene_array = gene.split(":")
+                gene = gene_array[0]
+                if gene in ignore_genes:
+                    continue
+                if len(gene_array) == 2:
+                    try:
+                        weight = float(gene_array[1])
+                    except ValueError:
+                        warn("Couldn't convert weight %s to number so skipping token: %s" % (weight, ":".join(gene_array)))
+                        continue
+                else:
+                    weight = 1.0
+
+                if gene_to_ind is not None and gene in gene_to_ind:
+                    gene_ind = gene_to_ind[gene]
+                else:
+                    if gene not in new_gene_to_ind:
+                        gene_ind = len(new_gene_to_ind)
+                        if gene_to_ind is not None:
+                            gene_ind += len(gene_to_ind)
+                        new_gene_to_ind[gene] = gene_ind
+                        genes.append(gene)
+                    else:
+                        gene_ind = new_gene_to_ind[gene]
+
+                col.append(gene_set_ind)
+                row.append(gene_ind)
+                data.append(weight)
+            num_read += 1
+            cur_num_read += 1
+
+            if len(data) >= max_num_entries_at_once:
+                log("Batching %d lines to save memory" % cur_num_read)
+                num_added, num_ignored = add_to_x_fn((data, row, col), genes, gene_sets, tag, skip_scale_factors=False)
+                _record_x_addition(
+                    runtime_state,
+                    num_added=num_added,
+                    num_ignored=num_ignored,
+                    batch_value=batch_value,
+                    label_value=label_value,
+                    initial_p_value=initial_p_value,
+                    num_ignored_gene_sets=num_ignored_gene_sets,
+                    input_index=input_index,
+                    fail_if_first_empty=(input_index == 0),
+                )
+                (
+                    genes,
+                    gene_to_ind,
+                    new_gene_to_ind,
+                    gene_sets,
+                    data,
+                    row,
+                    col,
+                    num_read,
+                    cur_num_read,
+                ) = _init_sparse_x_batch_state(runtime_state)
+                log("Continuing reading...")
+
+        if already_seen > 0:
+            warn("Skipped second occurrence of %d repeated gene sets" % already_seen)
+        mat_info = (data, row, col) if len(data) > 0 else None
+
+    if mat_info is not None:
+        num_added, num_ignored = add_to_x_fn(mat_info, genes, gene_sets, tag, skip_scale_factors=False)
+        _record_x_addition(
+            runtime_state,
+            num_added=num_added,
+            num_ignored=num_ignored,
+            batch_value=batch_value,
+            label_value=label_value,
+            initial_p_value=initial_p_value,
+            num_ignored_gene_sets=num_ignored_gene_sets,
+            input_index=input_index,
+            fail_if_first_empty=(input_index == 0),
+        )
+
+    return (num_too_small, ignored_for_fraction_inc)
+
+
+def _process_x_input_file(
+    runtime_state,
+    X_in,
+    tag,
+    is_dense_input,
+    only_ids,
+    x_sparsify,
+    sparse_tags,
+    batch_value,
+    label_value,
+    initial_p_value,
+    num_ignored_gene_sets,
+    input_index,
+    add_to_x_fn,
+    min_gene_set_size,
+    only_inc_genes,
+    fraction_inc_genes,
+    ignore_genes,
+    max_num_entries_at_once,
+):
+    num_too_small = 0
+    ignored_for_fraction_inc = 0
+
+    if is_dense_input:
+        processed_dense = _process_dense_x_file(
+            runtime_state,
+            X_in=X_in,
+            tag=tag,
+            only_ids=only_ids,
+            x_sparsify=x_sparsify,
+            sparse_tags=sparse_tags,
+            batch_value=batch_value,
+            label_value=label_value,
+            initial_p_value=initial_p_value,
+            num_ignored_gene_sets=num_ignored_gene_sets,
+            input_index=input_index,
+            add_to_x_fn=add_to_x_fn,
+        )
+        if not processed_dense:
+            return (num_too_small, ignored_for_fraction_inc, False)
+    else:
+        num_too_small, ignored_for_fraction_inc = _process_sparse_x_file(
+            runtime_state,
+            X_in=X_in,
+            tag=tag,
+            only_ids=only_ids,
+            min_gene_set_size=min_gene_set_size,
+            only_inc_genes=only_inc_genes,
+            fraction_inc_genes=fraction_inc_genes,
+            ignore_genes=ignore_genes,
+            max_num_entries_at_once=max_num_entries_at_once,
+            batch_value=batch_value,
+            label_value=label_value,
+            initial_p_value=initial_p_value,
+            num_ignored_gene_sets=num_ignored_gene_sets,
+            input_index=input_index,
+            add_to_x_fn=add_to_x_fn,
+        )
+
+    return (num_too_small, ignored_for_fraction_inc, True)
+
 
 GeneSetData = EagglState
 
