@@ -37,9 +37,6 @@ try:
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
-        is_gz_file as pegs_is_gz_file,
-        is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
-        is_dig_open_data_uri as pegs_is_dig_open_data_uri,
         is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -47,7 +44,6 @@ try:
         load_json_config as pegs_load_json_config,
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
-        open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
@@ -64,9 +60,6 @@ except ImportError:
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
-        is_gz_file as pegs_is_gz_file,
-        is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
-        is_dig_open_data_uri as pegs_is_dig_open_data_uri,
         is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -74,7 +67,6 @@ except ImportError:
         load_json_config as pegs_load_json_config,
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
-        open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
@@ -1064,37 +1056,12 @@ if options.print_effective_config:
     sys.stdout.write("%s\n" % json.dumps(effective_config, indent=2, sort_keys=True))
     sys.exit(0)
 
-def urlopen_with_retry(file, flag=None, tries=5, delay=60, backoff=2):
+def _open_url_with_retry(file, flag=None):
     return pegs_urlopen_with_retry(
         file,
         flag=flag,
-        tries=tries,
-        delay=delay,
-        backoff=backoff,
         log_fn=lambda message: log(message),
         bail_fn=bail,
-    )
-
-def _is_dig_open_data_uri(filepath):
-    return pegs_is_dig_open_data_uri(filepath)
-
-def _is_dig_open_data_ancestry_trait_spec(spec):
-    return pegs_is_dig_open_data_ancestry_trait_spec(spec)
-
-def _open_dig_open_data(uri, flag=None):
-    return pegs_open_dig_open_data(
-        uri,
-        flag=flag,
-        log_fn=lambda message: log(message, INFO),
-        bail_fn=bail,
-    )
-
-def is_gz_file(filepath, is_remote, flag=None):
-    return pegs_is_gz_file(
-        filepath,
-        is_remote,
-        flag=flag,
-        urlopen_with_retry_fn=urlopen_with_retry,
     )
 
 def open_gz(file, flag=None):
@@ -1103,8 +1070,7 @@ def open_gz(file, flag=None):
         flag=flag,
         log_fn=lambda message: log(message, INFO),
         bail_fn=bail,
-        urlopen_with_retry_fn=urlopen_with_retry,
-        is_gz_file_fn=is_gz_file,
+        urlopen_with_retry_fn=_open_url_with_retry,
     )
 
 class EagglState(object):
