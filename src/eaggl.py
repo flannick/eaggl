@@ -32,6 +32,10 @@ try:
     from .pegs_utils import (
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
+        assign_default_batches as pegs_assign_default_batches,
+        prepare_read_x_inputs as pegs_prepare_read_x_inputs,
+        remove_tag_from_input as pegs_remove_tag_from_input,
+        xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         harmonize_cli_mode_args as pegs_harmonize_cli_mode_args,
         initialize_cli_logging as pegs_initialize_cli_logging,
@@ -60,6 +64,10 @@ except ImportError:
     from pegs_utils import (
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
+        assign_default_batches as pegs_assign_default_batches,
+        prepare_read_x_inputs as pegs_prepare_read_x_inputs,
+        remove_tag_from_input as pegs_remove_tag_from_input,
+        xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         harmonize_cli_mode_args as pegs_harmonize_cli_mode_args,
         initialize_cli_logging as pegs_initialize_cli_logging,
@@ -1732,177 +1740,25 @@ class EagglState(object):
 
         self._record_params({"filter_gene_set_p": filter_gene_set_p, "filter_negative": filter_negative, "threshold_weights": threshold_weights, "cap_weights": cap_weights, "max_num_gene_sets_initial": max_num_gene_sets_initial, "max_num_gene_sets": max_num_gene_sets, "max_num_gene_sets_hyper": max_num_gene_sets_hyper, "filter_gene_set_metric_z": filter_gene_set_metric_z, "num_chains_betas": num_chains_betas, "sigma_num_devs_to_top": sigma_num_devs_to_top, "p_noninf_inflate": p_noninf_inflate})
 
-        def remove_tag(X_in, tag_separator=':'):
-            tag = None
-            if tag_separator in X_in:
-                tag_index = X_in.index(tag_separator)
-                tag = X_in[:tag_index]
-
-                X_in = X_in[tag_index+1:]
-                if len(tag) == 0:
-                    tag = None
-            return (X_in, tag)
-
-        def add_tag(X_in, tag, tag_separator=':'):
-            if tag is None:
-                return X_in
-            else:
-                return tag_separator.join([tag, X_in])
-
-        def expand_Xs(Xs, orig_files):
-            new_Xs = []
-            batches = []
-            labels = []
-            new_orig_files = []
-            for i in range(len(Xs)):
-                X = Xs[i]
-                orig_file = orig_files[i]
-                batch = None
-                label = os.path.basename(orig_file)
-                if "." in label:
-                    label = ".".join(label.split(".")[:-1])
-                if batch_separator in X:
-                    batch = X.split(batch_separator)[-1]
-                    label = batch
-                    X = batch_separator.join(X.split(batch_separator)[:-1])
-
-                (X, tag) = remove_tag(X)
-                if tag is not None:
-                    label = tag
-
-                if file_separator is not None:
-                    x_to_add = X.split(file_separator)
-                else:
-                    x_to_add = [X]
-
-                new_Xs += x_to_add
-                batches += [batch] * len(x_to_add)
-                labels += [label] * len(x_to_add)
-                new_orig_files += [orig_file] * len(x_to_add)
-            return (new_Xs, batches, labels, new_orig_files)
-
-        initial_ps = None
-        if initial_p is not None:
-            if type(initial_p) is not list:
-                initial_p = [initial_p]
-            initial_ps = []
-            assert(xin_to_p_noninf_ind is not None)
-            
-
-        #list of the X files specified on the command line
-        X_ins = []
-        orig_files = []
-        if X_in is not None:
-            if type(X_in) == str:
-                X_ins = [X_in]
-                orig_files = [X_in]
-            elif type(X_in) == list:
-                X_ins = X_in
-                orig_files = copy.copy(X_in)
-
-        if initial_ps is not None:
-            for X_in in X_ins:
-                assert(X_in in xin_to_p_noninf_ind)
-                initial_ps.append(xin_to_p_noninf_ind[X_in])
-            
-        is_dense = []
-
-        if X_list is not None:
-            X_lists = []
-            if type(X_list) == str:
-                X_lists = [X_list]
-            elif type(X_list) == list:
-                X_lists = X_list
-
-            for X_list in X_lists:
-
-                batch = None
-                if batch_separator in X_list:
-                    batch = X_list.split(batch_separator)[-1]
-                    X_list = batch_separator.join(X_list.split(batch_separator)[:-1])
-
-                xlist_dir = os.path.dirname(os.path.abspath(X_list))
-
-                with open_gz(X_list) as X_list_fh:
-                    for line in X_list_fh:
-                        line = line.strip()
-                        if len(line) == 0:
-                            continue
-
-                        (path, label) = remove_tag(line)
-                        if path and not os.path.isabs(path):
-                            path = os.path.normpath(os.path.join(xlist_dir, path))
-                        line = add_tag(path, label)
-
-                        if batch is not None and batch_separator not in line:
-                            line = "%s%s%s" % (line, batch_separator, batch)
-
-                        X_ins.append(line)
-                        if initial_ps is not None:
-                            assert(X_list in xin_to_p_noninf_ind)
-                            initial_ps.append(xin_to_p_noninf_ind[X_list])
-                        orig_files.append(X_list)
-
-        X_ins, batches, labels, orig_files = expand_Xs(X_ins, orig_files)
-
-        #TODO: read in labels here, batches2, and then when append
-
-        is_dense = [False for x in X_ins]
-
-        Xd_ins = []
-        orig_dfiles = []
-        if Xd_in is not None:
-            if type(Xd_in) == str:
-                Xd_ins = [Xd_in]
-                orig_dfiles = [Xd_in]
-            elif type(Xd_in) == list:
-                Xd_ins = Xd_in
-                orig_dfiles = Xd_in
-
-        if initial_ps is not None:
-            for Xd_in in Xd_ins:
-                assert(Xd_in in xin_to_p_noninf_ind)
-                initial_ps.append(xin_to_p_noninf_ind[Xd_in])
-
-        if Xd_list is not None:
-            if type(Xd_list) == str:
-                Xd_lists = [Xd_list]
-            elif type(Xd_list) == list:
-                Xd_lists = Xd_list
-
-            for Xd_list in Xd_lists:
-
-                batch = None
-                if batch_separator in Xd_list:
-                    batch = Xd_list.split(batch_separator)[-1]
-                    Xd_list = batch_separator.join(Xd_list.split(batch_separator)[:-1])
-
-                with open(Xd_list) as Xd_list_fh:
-                    for line in Xd_list_fh:
-                        line = line.strip('\n')
-                        if batch is not None and batch_separator not in line:
-                            line = "%s%s%s" % (line, batch_separator, batch)
-                        Xd_ins.append(line)
-                        if initial_ps is not None:
-                            assert(Xd_list in xin_to_p_noninf_ind)
-                            initial_ps.append(xin_to_p_noninf_ind[Xd_list])
-                        orig_dfiles.append(Xd_list)
-
-        Xd_ins, batches2, labels2, orig_dfiles = expand_Xs(Xd_ins, orig_dfiles)
-
-        #now map from inds to ps
-        if initial_ps is not None:
-            assert(type(initial_p) is list)
-            for i in range(len(initial_ps)):
-                assert(initial_ps[i]) >= 0 and initial_ps[i] < len(initial_p)
-                initial_ps[i] = initial_p[initial_ps[i]]
-
-
-        X_ins += Xd_ins
-        batches += batches2
-        labels += labels2
-        orig_files += orig_dfiles
-        is_dense += [True for x in Xd_ins]
+        _x_input_plan = pegs_prepare_read_x_inputs(
+            X_in=X_in,
+            X_list=X_list,
+            Xd_in=Xd_in,
+            Xd_list=Xd_list,
+            initial_p=initial_p,
+            xin_to_p_noninf_ind=xin_to_p_noninf_ind,
+            batch_separator=batch_separator,
+            file_separator=file_separator,
+            sparse_list_open_fn=open_gz,
+            dense_list_open_fn=open,
+        )
+        initial_ps = _x_input_plan.initial_ps
+        X_ins = _x_input_plan.X_ins
+        batches = _x_input_plan.batches
+        labels = _x_input_plan.labels
+        orig_files = _x_input_plan.orig_files
+        is_dense = _x_input_plan.is_dense
+        _xdata_seed = pegs_xdata_from_input_plan(_x_input_plan)
 
         #first reorder the files so that those with batches are at the front
 
@@ -1927,39 +1783,12 @@ class EagglState(object):
         #now handle the None batches
         #semantics are that things with a batch have value learned from all files with that batch,
         #things with None have it learned from first batch that appears in arg list
-
-        used_batches = set([str(b) for b in batches if b is not None])
-        next_batch_num = 1
-        def __generate_new_batch(new_batch_num):
-            new_batch = "BATCH%d" % new_batch_num
-            while new_batch in used_batches:
-                new_batch_num += 1
-                new_batch = "BATCH%d" % new_batch_num
-            used_batches.add(new_batch)
-            return new_batch, new_batch_num
-
-        for i in range(len(batches)):
-            if batches[i] is None:
-                batches[i], next_batch_num = __generate_new_batch(next_batch_num)
-
-                if batch_all_for_hyper:
-                    for j in range(i+1,len(batches)):
-                        batches[j] = batches[i]
-                    break
-                else:
-                    #now find all other none batches with the same file and update them too
-                    for j in range(i+1,len(batches)):
-                        if batches[j] is None and orig_files[i] == orig_files[j]:
-                            batches[j] = batches[i]
-
-            if first_for_hyper:
-                #make sure though that at least one batch is not None (this is what we will use to learn everything)
-                #but then break; keep None batches to learn from the first batch
-                #also set all other batches to None (we won't be learning for those)
-                for j in range(i+1, len(batches)):
-                    if batches[j] != batches[i]:
-                        batches[j] = None
-                break
+        batches = pegs_assign_default_batches(
+            batches=batches,
+            orig_files=orig_files,
+            batch_all_for_hyper=batch_all_for_hyper,
+            first_for_hyper=first_for_hyper,
+        )
 
 
         self._record_params({"num_X_batches": len(batches)})
@@ -1972,12 +1801,12 @@ class EagglState(object):
         num_ignored_gene_sets = np.zeros((len(batches)))
 
         #expands the file batches to have one per gene set
-        self.gene_set_batches = np.array([])
-        self.gene_set_labels = np.array([])
+        self.gene_set_batches = _xdata_seed.gene_set_batches[:0]
+        self.gene_set_labels = _xdata_seed.gene_set_labels[:0]
            
 
         self.gene_sets = []
-        self.is_dense_gene_set = np.array([], dtype=bool)
+        self.is_dense_gene_set = _xdata_seed.is_dense_gene_set[:0]
 
         if (filter_gene_set_p < 1 or filter_gene_set_metric_z) and self.Y is not None:
             self.gene_sets_ignored = []
