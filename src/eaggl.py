@@ -41,11 +41,10 @@ try:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_manifest as pegs_load_bundle_manifest,
+        load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
         open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
-        resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
@@ -64,11 +63,10 @@ except ImportError:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_manifest as pegs_load_bundle_manifest,
+        load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
         open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
-        resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
@@ -732,26 +730,22 @@ def _classify_factor_workflow(_options):
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
 def _load_eaggl_bundle_inputs(bundle_path):
-    extract_dir, manifest = pegs_load_bundle_manifest(
+    extract_dir, manifest, resolved_default_inputs = pegs_load_bundle_defaults(
         bundle_path,
         PEGS_EAGGL_BUNDLE_SCHEMA,
+        PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         bundle_flag_name="--eaggl-bundle-in",
+        manifest_name="manifest.json",
         temp_prefix="eaggl_bundle_in_",
         bail_fn=bail,
     )
     _EAGGL_BUNDLE_TEMP_DIRS.append(extract_dir)
-    resolved_default_inputs = pegs_resolve_bundle_default_inputs(
-        manifest.get("default_inputs"),
-        extract_dir,
-        PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
-        bundle_flag_name="--eaggl-bundle-in",
-        bail_fn=bail,
-    )
 
     return {
         "bundle_path": bundle_path,
         "extract_dir": extract_dir,
         "schema": PEGS_EAGGL_BUNDLE_SCHEMA,
+        "manifest": manifest,
         "default_inputs": resolved_default_inputs,
     }
 
