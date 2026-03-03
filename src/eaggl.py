@@ -33,6 +33,7 @@ try:
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
+        clean_chrom_name as pegs_clean_chrom_name,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
@@ -56,6 +57,7 @@ except ImportError:
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
+        clean_chrom_name as pegs_clean_chrom_name,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
@@ -7680,10 +7682,7 @@ class EagglState(object):
 
 
     def _clean_chrom(self, chrom):
-        if chrom[:3] == 'chr':
-            return chrom[3:]
-        else:
-            return chrom
+        return pegs_clean_chrom_name(chrom)
 
     def _read_correlations(self, gene_cor_file=None, gene_loc_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, compute_correlation_distance_function=True):
         if self.y_corr_cholesky is not None:
