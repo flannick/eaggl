@@ -31,6 +31,8 @@ import random
 try:
     from .pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
+        callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
+        callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         clean_chrom_name as pegs_clean_chrom_name,
@@ -55,6 +57,8 @@ try:
 except ImportError:
     from pegs_utils import (
         collect_cli_specified_dests as pegs_collect_cli_specified_dests,
+        callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
+        callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         clean_chrom_name as pegs_clean_chrom_name,
@@ -86,10 +90,8 @@ def bail(message):
 
 usage = "usage: eaggl.py [factor|naive_factor] [options]"
 
-def get_comma_separated_args(option, opt, value, parser):
-    setattr(parser.values, option.dest, value.split(','))
-def get_comma_separated_args_as_set(option, opt, value, parser):
-    setattr(parser.values, option.dest, set(value.split(',')))
+get_comma_separated_args = pegs_callback_set_comma_separated_args
+get_comma_separated_args_as_set = pegs_callback_set_comma_separated_args_as_set
 
 parser = optparse.OptionParser(usage)
 #gene x gene_set matrix
