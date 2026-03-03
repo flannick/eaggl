@@ -113,31 +113,10 @@ parser.add_option("","--V-in",default=None)
 parser.add_option("","--gene-map-in",default=None)
 parser.add_option("","--gene-map-orig-gene-col",default=1) #1-based column for original gene
 
-#GWAS association statistics (for HuGECalc)
-parser.add_option("","--gwas-in",default=None)
-parser.add_option("","--huge-statistics-in",default=None) #read precomputed HuGE statistics cache (equivalent to --gwas-in path)
-parser.add_option("","--huge-statistics-out",default=None) #write precomputed HuGE statistics cache from --gwas-in path
-
-#credible sets
-parser.add_option("","--credible-sets-in",default=None) #pass in credible sets to use 
-
-
-#S2G values (for HuGeCalc)
-parser.add_option("","--s2g-in",default=None)
-
-#Exomes association statistics (for HuGeCalc)
-parser.add_option("","--exomes-in",default=None)
-
 #Positive control genes
 parser.add_option("","--positive-controls-in",default=None)
 parser.add_option("","--positive-controls-list",type="string",action="callback",callback=get_comma_separated_args,default=None) #specify comma separated list of positive controls on the command line
 parser.add_option("","--positive-controls-all-in",default=None) #all genes to use in positive control analysis. If specified add these on top of the positive controls
-
-#Case counts
-#rows add across genes
-#to encode loss of function, use revel value above 1
-parser.add_option("","--case-counts-in",default=None)
-parser.add_option("","--ctrl-counts-in",default=None)
 
 #association statistics for gene bfs in each gene set (if precomputed)
 #REMINDER: the betas are all in *external* units
@@ -399,8 +378,6 @@ parser.add_option("","--factor-prune-gene-sets-val",type='float',default=None) #
 
 parser.add_option("","--add-gene-sets-by-enrichment-p",type='float',default=None) #when running multiple gene anchoring, add in gene sets that pass the enrichment filters. Filter according to p-value
 parser.add_option("","--add-gene-sets-by-fraction",type="float",default=None) #when running multiple gene anchoring, add in gene sets that have this fraction of input genes
-parser.add_option("","--add-gene-sets-by-naive",type="float",default=None) #when running multiple gene anchoring, add in gene sets with beta_uncorrected above this threshold after naive
-parser.add_option("","--add-gene-sets-by-gibbs",type="float",default=None) #when running multiple gene anchoring, add in gene sets with beta_uncorrected above this threshold after gibbs
 
 #simulation parameters
 
@@ -644,12 +621,8 @@ def _build_factor_workflow_error(_workflow_id, _missing_inputs):
 def _has_potentially_ignored_factor_inputs(_options):
     return bool(
         _options.gene_set_stats_in
-        or _options.gwas_in
-        or _options.huge_statistics_in
-        or _options.exomes_in
         or _options.positive_controls_in
         or _options.positive_controls_list is not None
-        or _options.case_counts_in
     )
 
 
@@ -657,8 +630,6 @@ def _warn_for_factor_workflow_inputs(_options, _workflow):
     add_gene_set_flags_present = (
         _options.add_gene_sets_by_enrichment_p is not None
         or _options.add_gene_sets_by_fraction is not None
-        or _options.add_gene_sets_by_naive is not None
-        or _options.add_gene_sets_by_gibbs is not None
     )
     if add_gene_set_flags_present and not _workflow["expand_gene_sets"]:
         warn("Ignoring options to add gene sets based on association with anchor genes because only 1 anchor gene was specified")
@@ -935,8 +906,6 @@ factor_workflow = None
 
 if mode == "factor" or mode == "naive_factor": #run factoring, phewas factoring, or pheno factoring
     run_factor = True
-    if options.add_gene_sets_by_naive is not None:
-        run_naive_factor = True
     if mode == "naive_factor":
         run_naive_factor = True
 
@@ -11604,15 +11573,6 @@ def _run_main_phewas_stage(g, options):
 
 
 def _run_main_factor_stage(g, options, mode_state, factor_input_state):
-    if mode_state["expand_gene_sets"]:
-        if options.add_gene_sets_by_naive is not None or options.add_gene_sets_by_gibbs is not None:
-            assert(g.betas_uncorrected is not None)
-            g.subset_gene_sets(g.betas_uncorrected / g.scale_factors > (options.add_gene_sets_by_gibbs if options.add_gene_sets_by_gibbs is not None else options.add_gene_sets_by_naive))
-            if len(g.gene_sets) == 0:
-                bail("Subsetting gene sets by %s removed all gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive"))
-            else:
-                log("Pruning by %s resulted in %d gene sets; try reducing threshold" % ("gibbs" if options.add_gene_sets_by_gibbs is not None else "naive", len(g.gene_sets)), DEBUG)
-
     if options.anchor_gene_set:
         gene_or_pheno_filter_value = options.gene_set_pheno_filter_value
     elif mode_state["factor_gene_set_x_pheno"]:
