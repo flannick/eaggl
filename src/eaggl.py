@@ -421,9 +421,6 @@ _collect_cli_specified_dests = pegs_collect_cli_specified_dests
 
 _merge_dicts = pegs_merge_dicts
 
-def _load_json_config(_config_path, _seen=None):
-    return pegs_load_json_config(_config_path, bail_fn=bail, seen_paths=_seen)
-
 _is_remote_path = pegs_is_remote_path
 
 _is_path_like_dest = pegs_is_path_like_dest
@@ -443,7 +440,7 @@ def _apply_config_overrides(_options, _args, _parser, _argv):
     _options.config = config_path
     config_dir = os.path.dirname(config_path)
 
-    config_data = _load_json_config(config_path)
+    config_data = pegs_load_json_config(config_path, bail_fn=bail, seen_paths=None)
     if "mode" in config_data:
         config_mode = config_data["mode"]
 
@@ -1058,21 +1055,19 @@ if options.print_effective_config:
     sys.stdout.write("%s\n" % json.dumps(effective_config, indent=2, sort_keys=True))
     sys.exit(0)
 
-def _open_url_with_retry(file, flag=None):
-    return pegs_urlopen_with_retry(
-        file,
-        flag=flag,
+def open_gz(file, flag=None):
+    open_url_with_retry_fn = lambda _file, _flag=None: pegs_urlopen_with_retry(
+        _file,
+        flag=_flag,
         log_fn=lambda message: log(message),
         bail_fn=bail,
     )
-
-def open_gz(file, flag=None):
     return pegs_open_text_auto(
         file,
         flag=flag,
         log_fn=lambda message: log(message, INFO),
         bail_fn=bail,
-        urlopen_with_retry_fn=_open_url_with_retry,
+        urlopen_with_retry_fn=open_url_with_retry_fn,
     )
 
 class EagglState(object):
