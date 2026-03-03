@@ -30,15 +30,15 @@ import random
 
 try:
     from .pegs_utils import (
-        collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
+        apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         configure_random_seed as pegs_configure_random_seed,
-        apply_config_option_overrides as pegs_apply_config_option_overrides,
         clean_chrom_name as pegs_clean_chrom_name,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
+        fail_removed_cli_aliases as pegs_fail_removed_cli_aliases,
         format_removed_option_message as pegs_format_removed_option_message,
         open_optional_log_handle as pegs_open_optional_log_handle,
         is_path_like_dest as pegs_is_path_like_dest,
@@ -57,15 +57,15 @@ try:
     )
 except ImportError:
     from pegs_utils import (
-        collect_cli_specified_dests as pegs_collect_cli_specified_dests,
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
+        apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         configure_random_seed as pegs_configure_random_seed,
-        apply_config_option_overrides as pegs_apply_config_option_overrides,
         clean_chrom_name as pegs_clean_chrom_name,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
+        fail_removed_cli_aliases as pegs_fail_removed_cli_aliases,
         format_removed_option_message as pegs_format_removed_option_message,
         open_optional_log_handle as pegs_open_optional_log_handle,
         is_path_like_dest as pegs_is_path_like_dest,
@@ -421,8 +421,6 @@ parser.add_option("","--debug-only-avg-huge",action="store_true")
 
 _iter_parser_options = pegs_iter_parser_options
 
-_collect_cli_specified_dests = pegs_collect_cli_specified_dests
-
 _merge_dicts = pegs_merge_dicts
 
 _is_remote_path = pegs_is_remote_path
@@ -432,48 +430,6 @@ _is_path_like_dest = pegs_is_path_like_dest
 _resolve_config_path_value = pegs_resolve_config_path_value
 
 _early_warn = pegs_emit_stderr_warning
-
-def _apply_config_overrides(_options, _args, _parser, _argv):
-    cli_specified_dests = _collect_cli_specified_dests(_argv, _parser)
-    config_mode = None
-
-    if _options.config is None:
-        return _options, _args, config_mode
-
-    config_path = _resolve_config_path_value(_options.config, os.getcwd())
-    _options.config = config_path
-    config_dir = os.path.dirname(config_path)
-
-    config_data = pegs_load_json_config(config_path, bail_fn=bail, seen_paths=None)
-    if "mode" in config_data:
-        config_mode = config_data["mode"]
-
-    if "options" in config_data:
-        config_options = config_data["options"]
-        if not isinstance(config_options, dict):
-            bail("Config key 'options' must be a JSON object")
-    else:
-        config_options = dict(config_data)
-        config_options.pop("mode", None)
-        config_options.pop("include", None)
-
-    pegs_apply_config_option_overrides(
-        _options,
-        _parser,
-        config_options,
-        config_path,
-        config_dir,
-        cli_specified_dests,
-        resolve_path_fn=_resolve_config_path_value,
-        is_path_like_dest_fn=_is_path_like_dest,
-        early_warn_fn=_early_warn,
-        bail_fn=bail,
-        removed_option_replacements=REMOVED_OPTION_REPLACEMENTS,
-        format_removed_option_message_fn=pegs_format_removed_option_message,
-        config_specified_dests=None,
-    )
-
-    return _options, _args, config_mode
 
 _json_safe = pegs_json_safe
 
@@ -510,17 +466,6 @@ REMOVED_OPTION_REPLACEMENTS = {
     "desired_intercept_difference": None,
     "chisq_threshold": None,
 }
-
-def _fail_removed_cli_aliases(_argv):
-    for _arg in _argv:
-        if not _arg.startswith("--"):
-            continue
-        _flag = _arg.split("=", 1)[0]
-        _normalized = _flag[2:].replace("-", "_")
-        if _normalized in REMOVED_OPTION_REPLACEMENTS:
-            replacement = REMOVED_OPTION_REPLACEMENTS[_normalized]
-            sys.stderr.write("%s\n" % pegs_format_removed_option_message(_flag, replacement, context="cli"))
-            sys.exit(2)
 
 def _enforce_eaggl_mode_ownership(_mode):
     factor_modes = set(["factor", "naive_factor"])
@@ -771,10 +716,27 @@ def _apply_eaggl_bundle_inputs(_options):
     bundle_info["applied_defaults"] = applied
     return bundle_info
 
-_fail_removed_cli_aliases(sys.argv[1:])
+argv_parse = sys.argv[1:]
+pegs_fail_removed_cli_aliases(
+    argv_parse,
+    REMOVED_OPTION_REPLACEMENTS,
+    format_removed_option_message_fn=pegs_format_removed_option_message,
+)
 
-(options, args) = parser.parse_args()
-options, args, config_mode = _apply_config_overrides(options, args, parser, sys.argv[1:])
+(options, args) = parser.parse_args(argv_parse)
+(options, args, config_mode, _cli_specified_dests, _config_specified_dests) = pegs_apply_cli_config_overrides(
+    options,
+    args,
+    parser,
+    argv_parse,
+    resolve_path_fn=_resolve_config_path_value,
+    is_path_like_dest_fn=_is_path_like_dest,
+    early_warn_fn=_early_warn,
+    bail_fn=bail,
+    removed_option_replacements=REMOVED_OPTION_REPLACEMENTS,
+    format_removed_option_message_fn=pegs_format_removed_option_message,
+    track_config_specified_dests=False,
+)
 
 if len(args) < 1 and config_mode is not None:
     args = [config_mode]
