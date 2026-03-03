@@ -2464,133 +2464,32 @@ class EagglState(object):
             sigma_soft_threshold_5=sigma_soft_threshold_5,
         )
 
-        if not skip_betas and self.p_values is not None and (update_hyper_p or update_hyper_sigma) and len(self.gene_set_batches) > 0:
-
-            #now learn the hyper values
-            assert(self.gene_set_batches[0] is not None)
-            #first order the unique batches; batches has one value per file but we need info one per unique batch
-            ordered_batches = [self.gene_set_batches[0]] + list(set([x for x in self.gene_set_batches if not x == self.gene_set_batches[0]]))
-            #get the total number of ignored genes per batch
-            batches_num_ignored = {}
-            for i in range(len(batches)):
-                if batches[i] not in batches_num_ignored:
-                    batches_num_ignored[batches[i]] = 0
-                batches_num_ignored[batches[i]] += num_ignored_gene_sets[i]
-
-            if update_hyper_p:
-                self.ps = np.full(len(self.gene_set_batches), np.nan)
-            self.sigma2s = np.full(len(self.gene_set_batches), np.nan)
-
-            #none learns from first; rest learn from within themselves
-            first_p = None
-            for ordered_batch_ind in range(len(ordered_batches)):
-
-                if ordered_batches[ordered_batch_ind] is None:
-                    #we'll be drawing this from the first
-                    assert(first_for_hyper)
-                    continue
-
-                gene_sets_in_batch_mask = (self.gene_set_batches == ordered_batches[ordered_batch_ind])
-                gene_sets_for_hyper_mask = gene_sets_in_batch_mask.copy()
-
-                
-                if max_num_gene_sets_hyper is not None:
-                    if np.sum(gene_sets_for_hyper_mask) > max_num_gene_sets_hyper:
-                        drop_mask = np.random.default_rng().choice(np.where(gene_sets_for_hyper_mask)[0], size=np.sum(gene_sets_for_hyper_mask) - self.batch_size, replace=False)
-                        log("Dropping %d gene sets to reduce gene sets used for hyper parameters to %d" % (len(drop_mask), max_num_gene_sets_hyper))
-                        gene_sets_for_hyper_mask[drop_mask] = False
-
-
-
-                if ordered_batch_ind > 0 and np.sum(gene_sets_for_hyper_mask) + batches_num_ignored[ordered_batches[ordered_batch_ind]] < 100:
-                    log("Skipping learning hyper for batch %s since not enough gene sets" % (ordered_batches[ordered_batch_ind]))
-                    continue
-
-                #right now the way to pass these is to set member variables, so we save current and set
-                orig_ps = self.ps
-                orig_sigma2s = self.sigma2s
-                #there are always none for running betas here
-                self.ps = None
-                self.sigma2s = None
-
-
-                #orig_p = self.p
-                #orig_sigma2 = self.sigma2
-                #orig_sigma_power = self.sigma_power
-
-
-                if np.sum(gene_sets_for_hyper_mask) > self.batch_size:
-                    V = None
-                else:
-                    V = self._calculate_V_internal(self.X_orig[:,gene_sets_for_hyper_mask], self.y_corr_cholesky, self.mean_shifts[gene_sets_for_hyper_mask], self.scale_factors[gene_sets_for_hyper_mask])
-
-                #run non_inf_betas
-                #only add psuedo counts for large values
-                num_p_pseudo = min(1, np.sum(gene_sets_for_hyper_mask) / 1000)
-
-                #adjust sigma means keep sigma/p constant (thereby adjusting unconditional variance=sigma)
-                #if it is the first batch and first_for_hyper, we do not want to adjust the sigma
-                #similarly, if it is not first_for_hyper, we do not want to adjust the sigma
-                #we will learn it (if requested), but if not requested we assume that the specified sigma is the correct *UNCONDITIONAL* variance
-                #thus, we will learn p subject to this constraint on total variance
-                #after the first batch, however, when doing first_for_hyper, we will adjust sigma to keep the sigma/p fixed
-                cur_update_hyper_p = update_hyper_p
-                cur_update_hyper_sigma = update_hyper_sigma
-                adjust_hyper_sigma_p = False
-                if (first_for_sigma_cond and ordered_batch_ind > 0) or fixed_sigma_cond:
-                    adjust_hyper_sigma_p = True
-                    if cur_update_hyper_p:
-                        cur_update_hyper_sigma = False
-                Y_to_use = self.Y_for_regression
-                Y = np.exp(Y_to_use + self.background_log_bf) / (1 + np.exp(Y_to_use + self.background_log_bf))
-
-                (_, _) = self._calculate_non_inf_betas(initial_p=None, beta_tildes=self.beta_tildes[gene_sets_for_hyper_mask], ses=self.ses[gene_sets_for_hyper_mask], V=V, X_orig=self.X_orig[:,gene_sets_for_hyper_mask], scale_factors=self.scale_factors[gene_sets_for_hyper_mask], mean_shifts=self.mean_shifts[gene_sets_for_hyper_mask], is_dense_gene_set=self.is_dense_gene_set[gene_sets_for_hyper_mask], ps=None, max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=False, update_hyper_sigma=cur_update_hyper_sigma, update_hyper_p=cur_update_hyper_p, only_update_hyper=True, adjust_hyper_sigma_p=adjust_hyper_sigma_p, sigma_num_devs_to_top=sigma_num_devs_to_top, p_noninf_inflate=p_noninf_inflate, num_p_pseudo=num_p_pseudo, num_missing_gene_sets=batches_num_ignored[ordered_batches[ordered_batch_ind]], sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, betas_trace_out=betas_trace_out, betas_trace_gene_sets=[self.gene_sets[j] for j in range(len(self.gene_sets)) if gene_sets_for_hyper_mask[j]])
-
-                #now save and restore
-                computed_p = self.p
-                computed_sigma2 = self.sigma2
-                computed_sigma_power = self.sigma_power
-
-                #don't reset 
-                #if not first_for_sigma_cond and ordered_batch_ind > 0:
-                #    self.set_p(orig_p)
-                #    self.set_sigma(orig_sigma2, orig_sigma_power)
-
-                self.ps = orig_ps
-                self.sigma2s = orig_sigma2s
-
-                log("Learned p=%.4g, sigma2=%.4g (sigma2/p=%.4g)" % (computed_p, computed_sigma2, computed_sigma2/computed_p))
-                self._record_params({"p": computed_p, "sigma2": computed_sigma2, "sigma2_cond": computed_sigma2/computed_p, "sigma_power": computed_sigma_power, "sigma_threshold_k": self.sigma_threshold_k, "sigma_threshold_xo": self.sigma_threshold_xo})
-
-                if first_p is None:
-                    first_p = computed_p
-                elif first_max_p_for_hyper and computed_p > first_p:
-                    #keep sigma/first_p = sigma/computed_p
-                    computed_sigma2 = computed_sigma2 / computed_p * first_p
-                    computed_p = first_p
-
-                self.ps[gene_sets_in_batch_mask] = computed_p
-                self.sigma2s[gene_sets_in_batch_mask] = computed_sigma2
-
-            #take care of the missing ps
-
-            assert(len(self.ps) > 0 and not np.isnan(self.ps[0]))
-            assert(len(self.sigma2s) > 0 and not np.isnan(self.sigma2s[0]))
-
-            if first_for_hyper:
-                self.ps[np.isnan(self.ps)] = self.ps[0]
-                self.sigma2s[np.isnan(self.sigma2s)] = self.sigma2s[0]
-            else:
-                #this should only occur if the gene sets were too small
-                self.ps[np.isnan(self.ps)] = np.mean(self.ps[~np.isnan(self.ps)])
-                self.sigma2s[np.isnan(self.sigma2s)] = np.mean(self.sigma2s[~np.isnan(self.sigma2s)])
-
-            self.set_p(np.mean(self.ps))
-            self.set_sigma(np.mean(self.sigma2s), self.sigma_power)
-
-            #if shared_sigma_cond:
-            #    #we want sigma2/self.p2 to be constant
-            #    self.sigma2s = self.sigma2 * self.ps / self.p
+        _maybe_learn_batch_hyper_after_x_read(
+            self,
+            skip_betas=skip_betas,
+            update_hyper_p=update_hyper_p,
+            update_hyper_sigma=update_hyper_sigma,
+            batches=batches,
+            num_ignored_gene_sets=num_ignored_gene_sets,
+            first_for_hyper=first_for_hyper,
+            max_num_gene_sets_hyper=max_num_gene_sets_hyper,
+            first_for_sigma_cond=first_for_sigma_cond,
+            fixed_sigma_cond=fixed_sigma_cond,
+            first_max_p_for_hyper=first_max_p_for_hyper,
+            max_num_burn_in=max_num_burn_in,
+            max_num_iter_betas=max_num_iter_betas,
+            min_num_iter_betas=min_num_iter_betas,
+            num_chains_betas=num_chains_betas,
+            r_threshold_burn_in_betas=r_threshold_burn_in_betas,
+            use_max_r_for_convergence_betas=use_max_r_for_convergence_betas,
+            max_frac_sem_betas=max_frac_sem_betas,
+            max_allowed_batch_correlation=max_allowed_batch_correlation,
+            sigma_num_devs_to_top=sigma_num_devs_to_top,
+            p_noninf_inflate=p_noninf_inflate,
+            sparse_solution=sparse_solution,
+            sparse_frac_betas=sparse_frac_betas,
+            betas_trace_out=betas_trace_out,
+        )
 
 
         _maybe_adjust_overaggressive_p_filter_after_x_read(
