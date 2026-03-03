@@ -35,10 +35,12 @@ try:
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
+        emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
         is_gz_file as pegs_is_gz_file,
         is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
         is_dig_open_data_uri as pegs_is_dig_open_data_uri,
+        is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
@@ -60,10 +62,12 @@ except ImportError:
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
+        emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
         is_gz_file as pegs_is_gz_file,
         is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
         is_dig_open_data_uri as pegs_is_dig_open_data_uri,
+        is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
@@ -417,34 +421,22 @@ parser.add_option("","--debug-skip-correlation",action="store_true") #
 parser.add_option("","--debug-just-check-header",action="store_true") #
 parser.add_option("","--debug-only-avg-huge",action="store_true")
 
-def _iter_parser_options(_parser):
-    for _opt in pegs_iter_parser_options(_parser):
-        yield _opt
+_iter_parser_options = pegs_iter_parser_options
 
-def _collect_cli_specified_dests(_argv, _parser):
-    return pegs_collect_cli_specified_dests(_argv, _parser)
+_collect_cli_specified_dests = pegs_collect_cli_specified_dests
 
-def _merge_dicts(_base, _override):
-    return pegs_merge_dicts(_base, _override)
+_merge_dicts = pegs_merge_dicts
 
 def _load_json_config(_config_path, _seen=None):
     return pegs_load_json_config(_config_path, bail_fn=bail, seen_paths=_seen)
 
-def _is_remote_path(_value):
-    return pegs_is_remote_path(_value)
+_is_remote_path = pegs_is_remote_path
 
-def _is_path_like_dest(_dest):
-    if _dest is None:
-        return False
-    _dest_lower = _dest.lower()
-    return _dest_lower.endswith("_in") or _dest_lower.endswith("_out") or _dest_lower.endswith("_file") or "_file_" in _dest_lower or _dest_lower in ("log_file", "warnings_file", "config")
+_is_path_like_dest = pegs_is_path_like_dest
 
-def _resolve_config_path_value(_value, _config_dir):
-    return pegs_resolve_config_path_value(_value, _config_dir)
+_resolve_config_path_value = pegs_resolve_config_path_value
 
-def _early_warn(_message):
-    sys.stderr.write("Warning: %s\n" % _message)
-    sys.stderr.flush()
+_early_warn = pegs_emit_stderr_warning
 
 def _apply_config_overrides(_options, _args, _parser, _argv):
     cli_specified_dests = _collect_cli_specified_dests(_argv, _parser)
@@ -488,8 +480,7 @@ def _apply_config_overrides(_options, _args, _parser, _argv):
 
     return _options, _args, config_mode
 
-def _json_safe(_value):
-    return pegs_json_safe(_value)
+_json_safe = pegs_json_safe
 
 REMOVED_OPTION_REPLACEMENTS = {
     # PIGEAN-owned raw input modes/expansion controls are not supported in EAGGL.
