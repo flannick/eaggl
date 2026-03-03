@@ -38,6 +38,7 @@ try:
         load_aligned_gene_covariates as pegs_load_aligned_gene_covariates,
         load_and_apply_gene_phewas_bfs_to_runtime as pegs_load_and_apply_gene_phewas_bfs_to_runtime,
         load_and_apply_gene_set_statistics_to_runtime as pegs_load_and_apply_gene_set_statistics_to_runtime,
+        load_and_apply_gene_set_phewas_statistics_to_runtime as pegs_load_and_apply_gene_set_phewas_statistics_to_runtime,
         set_runtime_p as pegs_set_runtime_p,
         set_runtime_sigma as pegs_set_runtime_sigma,
         sync_y_state as pegs_sync_y_state,
@@ -79,6 +80,7 @@ except ImportError:
         load_aligned_gene_covariates as pegs_load_aligned_gene_covariates,
         load_and_apply_gene_phewas_bfs_to_runtime as pegs_load_and_apply_gene_phewas_bfs_to_runtime,
         load_and_apply_gene_set_statistics_to_runtime as pegs_load_and_apply_gene_set_statistics_to_runtime,
+        load_and_apply_gene_set_phewas_statistics_to_runtime as pegs_load_and_apply_gene_set_phewas_statistics_to_runtime,
         set_runtime_p as pegs_set_runtime_p,
         set_runtime_sigma as pegs_set_runtime_sigma,
         sync_y_state as pegs_sync_y_state,
@@ -3190,220 +3192,26 @@ class EagglState(object):
 
 
     def read_gene_set_phewas_statistics(self, stats_in, stats_id_col=None, stats_pheno_col=None, stats_beta_col=None, stats_beta_uncorrected_col=None, min_gene_set_beta=None, min_gene_set_beta_uncorrected=None, update_X=False, phenos_to_match=None, return_only_ids=False, max_num_entries_at_once=None):
-
-        if stats_in is None:
-            bail("Require --gene-set-stats-in or --gene-set-phewas-stats-in for this operation")
-
-        log("Reading --gene-set-phewas-stats-in file %s" % stats_in, INFO)
-
-        for delim in [None, '\t']:
-            subset_mask = None
-            need_to_take_log = False
-
-            read_ids = set()
-
-            success = True
-            with open_gz(stats_in) as stats_fh:
-                header_cols = stats_fh.readline().strip('\n').split(delim)
-                if len(header_cols) == 1:
-                    success = False
-                    continue
-                id_col = self._get_col(stats_id_col, header_cols)
-                pheno_col = self._get_col(stats_pheno_col, header_cols)
-
-                beta_col = None
-                if stats_beta_col is not None:
-                    beta_col = self._get_col(stats_beta_col, header_cols, True)
-                else:
-                    beta_col = self._get_col("beta", header_cols, False)
-
-                beta_uncorrected_col = None
-                if stats_beta_uncorrected_col is not None:
-                    beta_uncorrected_col = self._get_col(stats_beta_uncorrected_col, header_cols, True)
-                else:
-                    beta_uncorrected_col = self._get_col("beta_uncorrected", header_cols, False)
-
-                if beta_col is None and beta_uncorrected_col is None:
-                    bail("Require at least beta or beta_uncorrected to read from --gene-set-stats-in")
-
-                if self.gene_sets is not None:
-                    subset_mask = np.array([False] * len(self.gene_sets))
-
-                gene_sets = []
-                gene_set_to_ind = {}
-
-                phenos = []
-                pheno_to_ind = {}
-
-                ignored = 0
-
-                if max_num_entries_at_once is None:
-                    max_num_entries_at_once = 200 * 10000
-
-                betas = []
-                betas_uncorrected = []
-                row = []
-                col = []
-                betas_chunks = []
-                betas_uncorrected_chunks = []
-                row_chunks = []
-                col_chunks = []
-
-                def __flush_chunks():
-                    if len(row) == 0:
-                        return
-                    row_chunks.append(np.array(row, dtype=np.int32))
-                    col_chunks.append(np.array(col, dtype=np.int32))
-                    betas_chunks.append(np.array(betas, dtype=np.float64))
-                    betas_uncorrected_chunks.append(np.array(betas_uncorrected, dtype=np.float64))
-                    row[:] = []
-                    col[:] = []
-                    betas[:] = []
-                    betas_uncorrected[:] = []
-
-                for line in stats_fh:
-                    beta = None
-                    beta_uncorrected = None
-
-                    cols = line.strip('\n').split(delim)
-                    if len(cols) != len(header_cols):
-                        success = False
-                        continue
-
-                    if id_col > len(cols) or pheno_col > len(cols) or (beta_col is not None and beta_col > len(cols)) or (beta_uncorrected_col is not None and beta_uncorrected_col > len(cols)):
-                        warn("Skipping due to too few columns in line: %s" % line)
-                        continue
-
-                    gene_set = cols[id_col]
-                    pheno = cols[pheno_col]
-
-                    if phenos_to_match is not None and pheno not in phenos_to_match:
-                        continue
-
-                    if beta_col is not None:
-                        try:
-                            beta = float(cols[beta_col])
-                            if min_gene_set_beta is not None and beta < min_gene_set_beta:
-                                continue
-
-                        except ValueError:
-                            if not cols[beta_col] == "NA":
-                                warn("Skipping unconvertible beta value %s for gene_set %s" % (cols[beta_col], gene_set))
-                            continue
-
-                    if beta_uncorrected_col is not None:
-                        try:
-                            beta_uncorrected = float(cols[beta_uncorrected_col])
-                            if min_gene_set_beta_uncorrected is not None and beta_uncorrected < min_gene_set_beta_uncorrected:
-                                continue
-
-                        except ValueError:
-                            if not cols[beta_uncorrected_col] == "NA":
-                                warn("Skipping unconvertible beta_uncorrected value %s for gene_set %s" % (cols[beta_uncorrected_col], gene_set))
-                            continue
-
-                    if pheno in pheno_to_ind:
-                        pheno_ind = pheno_to_ind[pheno]
-                    else:
-                        pheno_ind = len(phenos)
-                        pheno_to_ind[pheno] = pheno_ind
-                        phenos.append(pheno)
-
-                    gene_set_ind = None
-
-                    if self.gene_sets is not None:
-                        if gene_set not in self.gene_set_to_ind:
-                            ignored += 1
-                            continue
-
-                        gene_set_ind = self.gene_set_to_ind[gene_set]
-                        if gene_set_ind is not None:
-                            subset_mask[gene_set_ind] = True
-                    else:
-                        #store these in all cases to be able to check for duplicate gene sets in the input
-                        gene_set_to_ind[gene_set] = len(gene_sets)
-                        gene_sets.append(gene_set)
-
-                    if return_only_ids:
-                        read_ids.add(gene_set)
-                        continue
-
-                    if gene_set_ind is not None:
-                        col.append(gene_set_ind)
-                        row.append(pheno_ind)
-
-                        if beta_uncorrected is not None:
-                            betas_uncorrected.append(beta_uncorrected)
-                        else:
-                            betas_uncorrected.append(beta)
-
-                        if beta is not None:
-                            betas.append(beta)
-                        else:
-                            betas.append(beta_uncorrected)
-
-                        if len(row) >= max_num_entries_at_once:
-                            __flush_chunks()
-
-                __flush_chunks()
-
-                log("Done reading --stats-in-file", DEBUG)
-
-                if success:
-                    break
-
-        if not success:
-            bail("Error: number of columns in header did not match number of columns in lines after header")
-
-        if return_only_ids:
-            return read_ids
-
-        if update_X:
-            if self.gene_sets is not None:
-                log("Subsetting matrices", DEBUG)
-                #need to subset existing matrices
-                if sum(subset_mask) != len(subset_mask):
-                    warn("Excluding %s values from previously loaded files because absent from --stats-in file" % (len(subset_mask) - sum(subset_mask)))
-                    self.subset_gene_sets(subset_mask, keep_missing=True)
-                log("Done subsetting matrices", DEBUG)
-
-            self._set_X(self.X_orig, self.genes, self.gene_sets, skip_N=True)
-
-        #store the phenotypes
-        if self.phenos is not None:
-            bail("Bug in code: cannot call this function if phenos have already been read")
-            
-        self.phenos = phenos
-
-        self.pheno_to_ind = self._construct_map_to_ind(phenos)
-
-        #uniquify if needed
-        if len(row_chunks) > 0:
-            row = np.concatenate(row_chunks)
-            col = np.concatenate(col_chunks)
-            betas = np.concatenate(betas_chunks)
-            betas_uncorrected = np.concatenate(betas_uncorrected_chunks)
-        else:
-            row = np.array([], dtype=np.int32)
-            col = np.array([], dtype=np.int32)
-            betas = np.array([], dtype=np.float64)
-            betas_uncorrected = np.array([], dtype=np.float64)
-
-        if len(row) > 0:
-            key = row.astype(np.int64) * int(len(self.gene_sets)) + col.astype(np.int64)
-            _, unique_indices = np.unique(key, return_index=True)
-        else:
-            unique_indices = np.array([], dtype=np.int64)
-        if len(unique_indices) < len(row):
-            warn("Found %d duplicate values; ignoring duplicates" % (len(row) - len(unique_indices)))
-
-        betas = betas[unique_indices]
-        betas_uncorrected = betas_uncorrected[unique_indices]
-        row = row[unique_indices]
-        col = col[unique_indices]
-
-        self.X_phewas_beta = sparse.csc_matrix((betas, (row, col)), shape=(len(self.phenos), len(self.gene_sets)))
-        self.X_phewas_beta_uncorrected = sparse.csc_matrix((betas_uncorrected, (row, col)), shape=(len(self.phenos), len(self.gene_sets)))
+        return pegs_load_and_apply_gene_set_phewas_statistics_to_runtime(
+            self,
+            stats_in,
+            stats_id_col=stats_id_col,
+            stats_pheno_col=stats_pheno_col,
+            stats_beta_col=stats_beta_col,
+            stats_beta_uncorrected_col=stats_beta_uncorrected_col,
+            min_gene_set_beta=min_gene_set_beta,
+            min_gene_set_beta_uncorrected=min_gene_set_beta_uncorrected,
+            update_X=update_X,
+            phenos_to_match=phenos_to_match,
+            return_only_ids=return_only_ids,
+            max_num_entries_at_once=max_num_entries_at_once,
+            open_text_fn=open_gz,
+            get_col_fn=self._get_col,
+            construct_map_to_ind_fn=self._construct_map_to_ind,
+            warn_fn=warn,
+            bail_fn=bail,
+            log_fn=lambda message: log(message, DEBUG),
+        )
 
 
     def _reread_gene_phewas_bfs(self):
