@@ -45,6 +45,7 @@ try:
         merge_dicts as pegs_merge_dicts,
         open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
+        resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
@@ -67,6 +68,7 @@ except ImportError:
         merge_dicts as pegs_merge_dicts,
         open_dig_open_data as pegs_open_dig_open_data,
         open_text_auto as pegs_open_text_auto,
+        resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
@@ -11185,22 +11187,12 @@ class EagglState(object):
 
     #utility function to map names or indices to column indicies
     def _get_col(self, col_name_or_index, header_cols, require_match=True):
-        try:
-            if col_name_or_index is None:
-                raise ValueError
-            if int(col_name_or_index) <= 0:
-                bail("All column ids specified as indices are 1-based")
-            return(int(col_name_or_index) - 1)
-        except ValueError:
-            matching_cols = [i for i in range(0,len(header_cols)) if header_cols[i] == col_name_or_index]
-            if len(matching_cols) == 0:
-                if require_match:
-                    bail("Could not find match for column %s in header: %s" % (col_name_or_index, "\t".join(header_cols)))
-                else:
-                    return None
-            if len(matching_cols) > 1:
-                bail("Found two matches for column %s in header: %s" % (col_name_or_index, "\t".join(header_cols)))
-            return matching_cols[0]
+        return pegs_resolve_column_index(
+            col_name_or_index,
+            header_cols,
+            require_match=require_match,
+            bail_fn=bail,
+        )
 
     # inverse_matrix calculations
 
