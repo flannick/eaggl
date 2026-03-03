@@ -51,6 +51,7 @@ try:
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
         open_text_auto as pegs_open_text_auto,
+        open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
@@ -80,6 +81,7 @@ except ImportError:
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
         open_text_auto as pegs_open_text_auto,
+        open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
         urlopen_with_retry as pegs_urlopen_with_retry,
@@ -1000,18 +1002,11 @@ if options.print_effective_config:
     sys.exit(0)
 
 def open_gz(file, flag=None):
-    open_url_with_retry_fn = lambda _file, _flag=None: pegs_urlopen_with_retry(
-        _file,
-        flag=_flag,
-        log_fn=lambda message: log(message),
-        bail_fn=bail,
-    )
-    return pegs_open_text_auto(
+    return pegs_open_text_with_retry(
         file,
         flag=flag,
         log_fn=lambda message: log(message, INFO),
         bail_fn=bail,
-        urlopen_with_retry_fn=open_url_with_retry_fn,
     )
 
 class EagglState(object):
