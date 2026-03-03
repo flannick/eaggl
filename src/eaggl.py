@@ -20,6 +20,7 @@ import json
 import tarfile
 import tempfile
 import re
+from dataclasses import dataclass, field
 import scipy
 import scipy.sparse as sparse
 import scipy.stats
@@ -8929,6 +8930,23 @@ def _build_main_mode_state():
     }
 
 
+@dataclass
+class FactorOnlyStageResult:
+    ran: bool = False
+    num_gene_sets: int = 0
+    factor_input_state: dict = field(default_factory=dict)
+
+
+@dataclass
+class MainPipelineResult:
+    state: object
+    mode_state: dict
+    factor_only: FactorOnlyStageResult
+    ran_phewas: bool = False
+    ran_factor: bool = False
+    ran_factor_phewas: bool = False
+
+
 def _enforce_factor_only_input_boundary(options, mode_state):
     if not mode_state.get("run_factor"):
         return
@@ -10203,7 +10221,7 @@ def _maybe_reduce_gene_sets_to_max_after_x_read(
 GeneSetData = EagglState
 
 
-def main():
+def run_main_pipeline(options):
 
     mode_state = _build_main_mode_state()
     _enforce_factor_only_input_boundary(options, mode_state)
@@ -10212,23 +10230,47 @@ def main():
     g = EagglState(background_prior=options.background_prior, batch_size=options.batch_size)
     _initialize_main_mappings(g, options)
     factor_input_state = _run_main_factor_only_pipeline(g, options, mode_state)
+    factor_stage_result = FactorOnlyStageResult(
+        ran=True,
+        num_gene_sets=len(g.gene_sets) if g.gene_sets is not None else 0,
+        factor_input_state=factor_input_state,
+    )
 
     _write_main_primary_outputs(g, options)
 
+    ran_phewas = False
     if mode_state["run_phewas"]:
         _run_main_phewas_stage(g, options)
+        ran_phewas = True
 
+    ran_factor = False
     if mode_state["run_factor"]:
         _run_main_factor_stage(g, options, mode_state, factor_input_state)
+        ran_factor = True
 
     _write_main_factor_outputs(g, options)
 
+    ran_factor_phewas = False
     if _should_run_main_factor_phewas_stage(mode_state):
         _run_main_factor_phewas_stage(g, options)
+        ran_factor_phewas = True
 
 
     if options.params_out:
         g.write_params(options.params_out)
+
+    return MainPipelineResult(
+        state=g,
+        mode_state=mode_state,
+        factor_only=factor_stage_result,
+        ran_phewas=ran_phewas,
+        ran_factor=ran_factor,
+        ran_factor_phewas=ran_factor_phewas,
+    )
+
+
+def main():
+    run_main_pipeline(options)
 
 if __name__ == '__main__':
 
