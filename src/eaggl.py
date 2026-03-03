@@ -34,14 +34,20 @@ try:
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         format_removed_option_message as pegs_format_removed_option_message,
+        is_gz_file as pegs_is_gz_file,
+        is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
+        is_dig_open_data_uri as pegs_is_dig_open_data_uri,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
         load_bundle_manifest as pegs_load_bundle_manifest,
         merge_dicts as pegs_merge_dicts,
+        open_dig_open_data as pegs_open_dig_open_data,
+        open_text_auto as pegs_open_text_auto,
         resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
@@ -51,14 +57,20 @@ except ImportError:
         configure_random_seed as pegs_configure_random_seed,
         apply_config_option_overrides as pegs_apply_config_option_overrides,
         format_removed_option_message as pegs_format_removed_option_message,
+        is_gz_file as pegs_is_gz_file,
+        is_dig_open_data_ancestry_trait_spec as pegs_is_dig_open_data_ancestry_trait_spec,
+        is_dig_open_data_uri as pegs_is_dig_open_data_uri,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
         load_bundle_manifest as pegs_load_bundle_manifest,
         merge_dicts as pegs_merge_dicts,
+        open_dig_open_data as pegs_open_dig_open_data,
+        open_text_auto as pegs_open_text_auto,
         resolve_bundle_default_inputs as pegs_resolve_bundle_default_inputs,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
@@ -1062,144 +1074,47 @@ if options.print_effective_config:
     sys.exit(0)
 
 def urlopen_with_retry(file, flag=None, tries=5, delay=60, backoff=2):
-    import urllib.request
-    import urllib.error
-
-    while tries > 1:
-        try:
-            if flag is not None:
-                return urllib.request.urlopen(file, flag)
-            else:
-                return urllib.request.urlopen(file)
-        except urllib.error.URLError as e:
-            log("%s, Retrying in %d seconds..." % (str(e), delay))
-            time.sleep(delay)
-            tries -= 1
-            delay *= backoff
-    bail("Couldn't open file after too many retries")
-
-_DIG_OPEN_DATA_PREFIX = "dig-open-data:"
-_DIG_OPEN_DATA_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.+-]+$")
+    return pegs_urlopen_with_retry(
+        file,
+        flag=flag,
+        tries=tries,
+        delay=delay,
+        backoff=backoff,
+        log_fn=lambda message: log(message),
+        bail_fn=bail,
+    )
 
 def _is_dig_open_data_uri(filepath):
-    return isinstance(filepath, str) and filepath.startswith(_DIG_OPEN_DATA_PREFIX)
+    return pegs_is_dig_open_data_uri(filepath)
 
 def _is_dig_open_data_ancestry_trait_spec(spec):
-    # Strict two-token shorthand: <ancestry>:<trait>
-    # Anything else is routed through open_text as free-form input.
-    if not isinstance(spec, str):
-        return False
-    if spec.count(":") != 1:
-        return False
-    ancestry, trait = spec.split(":", 1)
-    if len(ancestry) == 0 or len(trait) == 0:
-        return False
-    if "/" in ancestry or "/" in trait:
-        return False
-    if not _DIG_OPEN_DATA_TOKEN_RE.match(ancestry):
-        return False
-    if not _DIG_OPEN_DATA_TOKEN_RE.match(trait):
-        return False
-    return True
+    return pegs_is_dig_open_data_ancestry_trait_spec(spec)
 
 def _open_dig_open_data(uri, flag=None):
-    if flag is not None and "w" in flag:
-        bail("dig-open-data sources are read-only and cannot be opened for writing")
-
-    spec = uri[len(_DIG_OPEN_DATA_PREFIX):]
-    if len(spec.strip()) == 0:
-        bail("Invalid dig-open-data source '%s'; expected dig-open-data:<ancestry>:<trait>" % uri)
-
-    try:
-        from dig_open_data import open_text, open_trait
-    except ImportError:
-        bail("dig_open_data is required to read '%s'. Install https://github.com/flannick/dig-open-data/" % uri)
-
-    if _is_dig_open_data_ancestry_trait_spec(spec):
-        ancestry, trait = spec.split(":", 1)
-        log("Reading dig-open-data trait ancestry=%s trait=%s" % (ancestry, trait), INFO)
-        return open_trait(ancestry, trait)
-
-    # Fallback: allow direct URIs/keys understood by dig_open_data.open_text.
-    log("Reading dig-open-data source %s" % spec, INFO)
-    return open_text(spec)
+    return pegs_open_dig_open_data(
+        uri,
+        flag=flag,
+        log_fn=lambda message: log(message, INFO),
+        bail_fn=bail,
+    )
 
 def is_gz_file(filepath, is_remote, flag=None):
-
-    if len(filepath) >= 3 and (filepath[-3:] == ".gz" or filepath[-4:] == ".bgz") and (flag is None or 'w' not in flag):
-        try:
-            if is_remote:
-                test_fh = urlopen_with_retry(filepath)
-            else:
-                test_fh = gzip.open(filepath, 'rb')
-
-            try:
-                test_fh.readline()
-                test_fh.close()
-                return True
-            except Exception:
-                return False
-
-        except FileNotFoundError:
-            return True
-
-    elif flag is None or 'w' not in flag:
-        flag = 'rb'
-        if is_remote:
-            test_fh = urlopen_with_retry(filepath)
-        else:
-            test_fh = open(filepath, 'rb')
-
-        is_gz = test_fh.read(2) == b'\x1f\x8b'
-        test_fh.close()
-        return is_gz
-    else:
-        return filepath[-3:] == ".gz" or filepath[-4:] == ".bgz"
+    return pegs_is_gz_file(
+        filepath,
+        is_remote,
+        flag=flag,
+        urlopen_with_retry_fn=urlopen_with_retry,
+    )
 
 def open_gz(file, flag=None):
-    if _is_dig_open_data_uri(file):
-        return _open_dig_open_data(file, flag=flag)
-
-    is_remote = False
-    remote_prefixes = ["http:", "https:", "ftp:"]
-    for remote_prefix in remote_prefixes:
-        if len(file) >= len(remote_prefix) and file[:len(remote_prefix)] == remote_prefix:
-            is_remote = True
-
-    if is_gz_file(file, is_remote, flag=flag):
-        open_fun = gzip.open
-        if flag is not None and len(flag) > 0 and not flag[-1] == 't':
-            flag = "%st" % flag
-        elif flag is None:
-            flag = "rt"
-    else:
-        open_fun = open
-
-    if is_remote:
-        import io
-        if flag is not None:
-            if open_fun is open:
-                fh = io.TextIOWrapper(urlopen_with_retry(file, flag))
-            else:
-                fh = open_fun(urlopen_with_retry(file), flag)
-        else:
-            if open_fun is open:
-                fh = io.TextIOWrapper(urlopen_with_retry(file))
-            else:
-                fh = open_fun(urlopen_with_retry(file))
-    else:
-        if flag is not None:
-            try:
-                fh = open_fun(file, flag, encoding="utf-8")
-            except LookupError:
-                fh = open_fun(file, flag)
-        else:
-            try:
-                fh = open_fun(file, encoding="utf-8")
-            except LookupError:
-                fh = open_fun(file)
-
-    return fh
+    return pegs_open_text_auto(
+        file,
+        flag=flag,
+        log_fn=lambda message: log(message, INFO),
+        bail_fn=bail,
+        urlopen_with_retry_fn=urlopen_with_retry,
+        is_gz_file_fn=is_gz_file,
+    )
 
 class EagglState(object):
     '''
