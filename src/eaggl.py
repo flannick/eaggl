@@ -37,6 +37,12 @@ try:
         parse_gene_bfs_file as pegs_parse_gene_bfs_file,
         parse_gene_phewas_bfs_file as pegs_parse_gene_phewas_bfs_file,
         parse_gene_set_statistics_file as pegs_parse_gene_set_statistics_file,
+        y_data_from_runtime as pegs_y_data_from_runtime,
+        apply_y_data_to_runtime as pegs_apply_y_data_to_runtime,
+        hyperparameter_data_from_runtime as pegs_hyperparameter_data_from_runtime,
+        apply_hyperparameter_data_to_runtime as pegs_apply_hyperparameter_data_to_runtime,
+        phewas_runtime_state_from_runtime as pegs_phewas_runtime_state_from_runtime,
+        apply_phewas_runtime_state_to_runtime as pegs_apply_phewas_runtime_state_to_runtime,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
@@ -72,6 +78,12 @@ except ImportError:
         parse_gene_bfs_file as pegs_parse_gene_bfs_file,
         parse_gene_phewas_bfs_file as pegs_parse_gene_phewas_bfs_file,
         parse_gene_set_statistics_file as pegs_parse_gene_set_statistics_file,
+        y_data_from_runtime as pegs_y_data_from_runtime,
+        apply_y_data_to_runtime as pegs_apply_y_data_to_runtime,
+        hyperparameter_data_from_runtime as pegs_hyperparameter_data_from_runtime,
+        apply_hyperparameter_data_to_runtime as pegs_apply_hyperparameter_data_to_runtime,
+        phewas_runtime_state_from_runtime as pegs_phewas_runtime_state_from_runtime,
+        apply_phewas_runtime_state_to_runtime as pegs_apply_phewas_runtime_state_to_runtime,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
@@ -1474,6 +1486,10 @@ class EagglState(object):
         self.factor_phewas_combined_prior_Ys_huber_zs = None #phewas statistics
         self.factor_phewas_combined_prior_Ys_huber_p_values = None #phewas statistics
         self.factor_phewas_combined_prior_Ys_huber_one_sided_p_values = None #phewas statistics
+
+        self.y_state = pegs_y_data_from_runtime(self)
+        self.hyperparameter_state = pegs_hyperparameter_data_from_runtime(self)
+        self.phewas_state = pegs_phewas_runtime_state_from_runtime(self)
 
     def init_gene_locs(self, gene_loc_file):
         log("Reading --gene-loc-file %s" % gene_loc_file)
@@ -3597,17 +3613,21 @@ class EagglState(object):
         if priors is not None:
             self.gene_pheno_priors = sparse.csc_matrix((priors, (row, col)), shape=(len(self.genes), len(self.phenos)))
         
+        self.anchor_gene_mask = None
         if anchor_genes is not None:
-            anchor_gene_mask = np.array([x in anchor_genes for x in self.genes])
-            if np.sum(anchor_gene_mask) == 0:
+            self.anchor_gene_mask = np.array([x in anchor_genes for x in self.genes])
+            if np.sum(self.anchor_gene_mask) == 0:
                 bail("Couldn't find any match for %s" % list(anchor_genes))
 
         log("Read values for %d gene, pheno pairs" % (len(self.gene_pheno_Y.nonzero()[0]) if self.gene_pheno_Y is not None else 0), DEBUG)
 
+        self.anchor_pheno_mask = None
         if anchor_phenos is not None:
-            anchor_pheno_mask = np.array([x in anchor_phenos for x in self.phenos])
-            if np.sum(anchor_pheno_mask) == 0:
+            self.anchor_pheno_mask = np.array([x in anchor_phenos for x in self.phenos])
+            if np.sum(self.anchor_pheno_mask) == 0:
                 bail("Couldn't find any match for %s" % list(anchor_phenos))
+        self.phewas_state = pegs_phewas_runtime_state_from_runtime(self)
+        pegs_apply_phewas_runtime_state_to_runtime(self, self.phewas_state)
 
 
     def has_gene_sets(self):
@@ -3618,13 +3638,16 @@ class EagglState(object):
         #    log("Set p called with p=%s" % p, TRACE)
         #else:
         #    log("Set p called with p=%.3g" % p, TRACE)
+        hyper_state = pegs_hyperparameter_data_from_runtime(self)
 
         if p is not None:
             if p > 1:
                 p = 1
             if p < 0:
                 p = 0
-        self.p = p
+        hyper_state.p = p
+        pegs_apply_hyperparameter_data_to_runtime(self, hyper_state)
+        self.hyperparameter_state = hyper_state
 
     def get_scaled_sigma2(self, scale_factors, sigma2, sigma_power, sigma_threshold_k=None, sigma_threshold_xo=None):
         threshold = 1
@@ -3660,9 +3683,8 @@ class EagglState(object):
         #This setter does not validate any of this, so
         #1. when getting sigma, you must convert to internal sigma units
         #2. when setting sigma, you must pass in external units if const sigma and internal units if not
-
-
-        self.sigma_power = sigma_power
+        hyper_state = pegs_hyperparameter_data_from_runtime(self)
+        hyper_state.sigma_power = sigma_power
         if sigma_power is None:
             #default is to have constant sigma in external units of beta, so beta is 2
             sigma_power = 2
@@ -3675,42 +3697,46 @@ class EagglState(object):
             #sigma2 = sigma2_ext / E[scale_factors_j ** (sigma_power - 2)]
             if self.scale_factors is not None:
                 if self.is_dense_gene_set is not None and np.sum(~self.is_dense_gene_set) > 0:
-                    self.sigma2 = sigma2 / np.mean(np.power(self.scale_factors[~self.is_dense_gene_set], self.sigma_power - 2))
+                    hyper_state.sigma2 = sigma2 / np.mean(np.power(self.scale_factors[~self.is_dense_gene_set], hyper_state.sigma_power - 2))
                 else:
-                    self.sigma2 = sigma2 / np.mean(np.power(self.scale_factors, self.sigma_power - 2))
+                    hyper_state.sigma2 = sigma2 / np.mean(np.power(self.scale_factors, hyper_state.sigma_power - 2))
             else:
-                self.sigma2 = sigma2 / np.power(self.MEAN_MOUSE_SCALE, self.sigma_power - 2)
+                hyper_state.sigma2 = sigma2 / np.power(self.MEAN_MOUSE_SCALE, hyper_state.sigma_power - 2)
         else:
-            self.sigma2 = sigma2
+            hyper_state.sigma2 = sigma2
 
         if sigma2_osc is not None:
-            self.sigma2_osc = sigma2_osc
+            hyper_state.sigma2_osc = sigma2_osc
 
         if sigma2_scale_factors is None:
             sigma2_scale_factors = self.scale_factors
 
         if sigma2_se is not None:
-            self.sigma2_se = sigma2_se
-        if self.sigma2_p is not None:
-            self.sigma2_p = sigma2_p
+            hyper_state.sigma2_se = sigma2_se
+        if hyper_state.sigma2_p is not None:
+            hyper_state.sigma2_p = sigma2_p
 
-        if self.sigma2 is None and self.sigma2_osc is None:
+        if hyper_state.sigma2 is None and hyper_state.sigma2_osc is None:
+            pegs_apply_hyperparameter_data_to_runtime(self, hyper_state)
+            self.hyperparameter_state = hyper_state
             return
 
-        sigma2_for_var = self.sigma2_osc if self.sigma2_osc is not None else self.sigma2
+        sigma2_for_var = hyper_state.sigma2_osc if hyper_state.sigma2_osc is not None else hyper_state.sigma2
 
         if sigma2_for_var is not None and sigma2_scale_factors is not None:
-            if self.sigma_power is None:
-                self.sigma2_total_var = sigma2_for_var * len(sigma2_scale_factors)
+            if hyper_state.sigma_power is None:
+                hyper_state.sigma2_total_var = sigma2_for_var * len(sigma2_scale_factors)
             else:
-                self.sigma2_total_var = sigma2_for_var * np.sum(np.square(sigma2_scale_factors))
+                hyper_state.sigma2_total_var = sigma2_for_var * np.sum(np.square(sigma2_scale_factors))
 
-        if self.sigma2_total_var is not None and self.sigma2_se is not None:
-            self.sigma2_total_var_lower = self.sigma2_total_var * (sigma2_for_var - 1.96 * self.sigma2_se)/(sigma2_for_var)
-            self.sigma2_total_var_upper = self.sigma2_total_var * (sigma2_for_var + 1.96 * self.sigma2_se)/(sigma2_for_var)
+        if hyper_state.sigma2_total_var is not None and hyper_state.sigma2_se is not None:
+            hyper_state.sigma2_total_var_lower = hyper_state.sigma2_total_var * (sigma2_for_var - 1.96 * hyper_state.sigma2_se)/(sigma2_for_var)
+            hyper_state.sigma2_total_var_upper = hyper_state.sigma2_total_var * (sigma2_for_var + 1.96 * hyper_state.sigma2_se)/(sigma2_for_var)
 
         #minimum bound
-        if self.sigma2 is None:
+        pegs_apply_hyperparameter_data_to_runtime(self, hyper_state)
+        self.hyperparameter_state = hyper_state
+        if hyper_state.sigma2 is None:
             return
 
     def write_params(self, output_file):
@@ -9412,6 +9438,8 @@ class EagglState(object):
         self.Y_exomes = Y_exomes
         self.Y_positive_controls = Y_positive_controls
         self.Y_case_counts = Y_case_counts
+        self.y_state = pegs_y_data_from_runtime(self)
+        pegs_apply_y_data_to_runtime(self, self.y_state)
 
     def _get_y_corr_cholesky(self, Y_corr_m):
         Y_corr_m_copy = copy.copy(Y_corr_m)
