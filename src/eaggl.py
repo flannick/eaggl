@@ -40,6 +40,7 @@ try:
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
+        open_optional_log_handle as pegs_open_optional_log_handle,
         is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -66,6 +67,7 @@ except ImportError:
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
         format_removed_option_message as pegs_format_removed_option_message,
+        open_optional_log_handle as pegs_open_optional_log_handle,
         is_path_like_dest as pegs_is_path_like_dest,
         iter_parser_options as pegs_iter_parser_options,
         is_remote_path as pegs_is_remote_path,
@@ -779,11 +781,7 @@ if len(args) < 1 and config_mode is not None:
 elif len(args) >= 1 and config_mode is not None and args[0] != config_mode:
     _early_warn("Config mode '%s' differs from CLI mode '%s'; using CLI mode" % (config_mode, args[0]))
 
-log_fh = None
-if options.log_file is not None:
-    log_fh = open(options.log_file, 'w')
-else:
-    log_fh = sys.stderr
+log_fh = pegs_open_optional_log_handle(options.log_file, default_stream=sys.stderr, mode="w")
 
 NONE=0
 INFO=1
@@ -798,11 +796,7 @@ def log(message, level=INFO, end_char='\n'):
         log_fh.flush()
 
 #set up warnings
-warnings_fh = None
-if options.warnings_file is not None:
-    warnings_fh = open(options.warnings_file, 'w')
-else:
-    warnings_fh = sys.stderr
+warnings_fh = pegs_open_optional_log_handle(options.warnings_file, default_stream=sys.stderr, mode="w")
 
 def warn(message):
     if warnings_fh is not None:
