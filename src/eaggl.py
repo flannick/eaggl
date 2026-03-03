@@ -2593,83 +2593,49 @@ class EagglState(object):
             #    self.sigma2s = self.sigma2 * self.ps / self.p
 
 
-        if filter_gene_set_p is not None and increase_filter_gene_set_p is not None and self.p_values is not None and self.p_values_ignored is not None:
-            #since we required each batch to have increase_filter_gene_set_p, maybe we need to reduce
-            if float(len(self.p_values)) / (len(self.p_values) + len(self.p_values_ignored)) > increase_filter_gene_set_p:
-                #choose a potentially more strict threshold
-                #want keep_frac * len(self.p_values) / (len(self.p_values) + len(self.p_values_ignored)) = filter_gene_set_p
-                keep_frac = increase_filter_gene_set_p * float(len(self.p_values) + len(self.p_values_ignored)) / len(self.p_values)
-                p_from_quantile = np.quantile(self.p_values, keep_frac)
-                if p_from_quantile > filter_gene_set_p and not filter_using_phewas:
-                    overcorrect_ignore = self.p_values > p_from_quantile
-                    if np.sum(overcorrect_ignore) > 0:
-                        overcorrect_mask = ~overcorrect_ignore
-                        self._record_param("adjusted_filter_gene_set_p", p_from_quantile)
-                        log("Ignoring %d gene sets due to p > %.3g (overaggressive adjustment of p-value filters; kept %d)" % (np.sum(overcorrect_ignore), p_from_quantile, np.sum(overcorrect_mask)))
-                        self.subset_gene_sets(overcorrect_mask, ignore_missing=True, keep_missing=False, skip_V=True)
+        _maybe_adjust_overaggressive_p_filter_after_x_read(
+            self,
+            filter_gene_set_p=filter_gene_set_p,
+            increase_filter_gene_set_p=increase_filter_gene_set_p,
+            filter_using_phewas=filter_using_phewas,
+        )
 
-        #do another check of min_gene_set_size in case we converted some gene sets with weights
-        if self.X_orig is not None:
-            col_sums = self.get_col_sums(self.X_orig, num_nonzero=True)
-            size_ignore = col_sums < min_gene_set_size
-
-            if np.sum(size_ignore) > 0:
-                size_mask = ~size_ignore
-                log("Ignoring %d gene sets due to too few genes (kept %d)" % (np.sum(size_ignore), np.sum(size_mask)))
-                self.subset_gene_sets(size_mask, keep_missing=False, skip_V=True)
-
-            col_sums = self.get_col_sums(self.X_orig, num_nonzero=True)
-            size_ignore = col_sums > max_gene_set_size
-            if np.sum(size_ignore) > 0:
-                size_mask = ~size_ignore
-                log("Ignoring %d gene sets due to too many genes (kept %d)" % (np.sum(size_ignore), np.sum(size_mask)))
-                self.subset_gene_sets(size_mask, keep_missing=False, skip_V=True)
-
-            if self.total_qc_metrics is not None and filter_gene_set_metric_z:
-                filter_mask = np.abs(self.mean_qc_metrics) < filter_gene_set_metric_z
-                filter_ignore = ~filter_mask
-                log("Ignoring %d gene sets due to QC metric filters (kept %d)" % (np.sum(filter_ignore), np.sum(filter_mask)))
-                self.subset_gene_sets(filter_mask, keep_missing=False, ignore_missing=True, skip_V=True)
-
-                #self.total_qc_metrics = np.vstack((self.mean_qc_metrics, np.ones(len(self.mean_qc_metrics)))).T
-                #self.total_qc_metrics_ignored = np.vstack((self.mean_qc_metrics_ignored, np.ones(len(self.mean_qc_metrics_ignored)))).T
+        # Do another size/QC pass after all in-memory transformations.
+        _apply_post_read_gene_set_size_and_qc_filters(
+            self,
+            min_gene_set_size=min_gene_set_size,
+            max_gene_set_size=max_gene_set_size,
+            filter_gene_set_metric_z=filter_gene_set_metric_z,
+        )
 
         if self.p_values is not None:
             sort_rank = -np.sqrt(-np.log(self.p_values + 1e-200))
         else:
             sort_rank = None
-        if not skip_betas and self.p_values is not None and filter_gene_set_p < 1 and not filter_using_phewas:
-            #remove those that have uncorrected beta equal to zero
-            (betas, avg_postp) = self._calculate_non_inf_betas(initial_p=None, assume_independent=True, max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter_betas, min_num_iter=min_num_iter_betas, num_chains=num_chains_betas, r_threshold_burn_in=r_threshold_burn_in_betas, use_max_r_for_convergence=use_max_r_for_convergence_betas, max_frac_sem=max_frac_sem_betas, max_allowed_batch_correlation=max_allowed_batch_correlation, gauss_seidel=False, update_hyper_sigma=False, update_hyper_p=False, adjust_hyper_sigma_p=False, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas)
+        sort_rank = _maybe_filter_zero_uncorrected_betas_after_x_read(
+            self,
+            sort_rank=sort_rank,
+            skip_betas=skip_betas,
+            filter_gene_set_p=filter_gene_set_p,
+            filter_using_phewas=filter_using_phewas,
+            max_num_burn_in=max_num_burn_in,
+            max_num_iter_betas=max_num_iter_betas,
+            min_num_iter_betas=min_num_iter_betas,
+            num_chains_betas=num_chains_betas,
+            r_threshold_burn_in_betas=r_threshold_burn_in_betas,
+            use_max_r_for_convergence_betas=use_max_r_for_convergence_betas,
+            max_frac_sem_betas=max_frac_sem_betas,
+            max_allowed_batch_correlation=max_allowed_batch_correlation,
+            sparse_solution=sparse_solution,
+            sparse_frac_betas=sparse_frac_betas,
+        )
 
-            log("%d have betas uncorrected equal 0" % np.sum(betas == 0))
-            log("%d have betas uncorrected below 0.001" % np.sum(betas < 0.001))
-            log("%d have betas uncorrected below 0.01" % np.sum(betas < 0.01))
-
-            beta_ignore = betas == 0
-            beta_mask = ~beta_ignore
-            if np.sum(beta_mask) > 0:
-                log("Ignoring %d gene sets due to zero uncorrected betas (kept %d)" % (np.sum(beta_ignore), np.sum(beta_mask)))
-                self.subset_gene_sets(beta_mask, keep_missing=False, ignore_missing=True, skip_V=True)
-            else:
-                log("Keeping %d gene sets with zero uncorrected betas to avoid having none" % (np.sum(beta_ignore)))
-
-            sort_rank = -np.abs(betas[beta_mask])
-
-        if not skip_betas and max_num_gene_sets is not None and len(self.gene_sets) > max_num_gene_sets and max_num_gene_sets > 0:
-            log("Current %d gene sets is greater than the maximum specified %d; reducing using pruning + small beta removal" % (len(self.gene_sets), max_num_gene_sets), DEBUG)
-            gene_set_masks = self._compute_gene_set_batches(V=None, X_orig=self.X_orig, mean_shifts=self.mean_shifts, scale_factors=self.scale_factors, sort_values=sort_rank, resort_as_added=True, stop_at=max_num_gene_sets)
-            keep_mask = np.full(len(self.gene_sets), False)
-            for gene_set_mask in gene_set_masks:
-                keep_mask[gene_set_mask] = True
-                log("Adding %d relatively uncorrelated gene sets (total now %d)" % (np.sum(gene_set_mask), np.sum(keep_mask)), TRACE)
-                if np.sum(keep_mask) > max_num_gene_sets:
-                    break
-            if np.sum(keep_mask) > max_num_gene_sets:
-                threshold_value = sorted(sort_rank[keep_mask])[max_num_gene_sets - 1]
-                keep_mask[sort_rank > threshold_value] = False
-            if np.sum(~keep_mask) > 0:
-                self.subset_gene_sets(keep_mask, keep_missing=False, ignore_missing=True, skip_V=True)
+        _maybe_reduce_gene_sets_to_max_after_x_read(
+            self,
+            skip_betas=skip_betas,
+            max_num_gene_sets=max_num_gene_sets,
+            sort_rank=sort_rank,
+        )
 
         pegs_record_read_x_counts(
             self,
@@ -10551,6 +10517,158 @@ def _initialize_hyper_defaults_after_x_read(
             log("Thresholding sigma with k=%.3g, xo=%.3g" % (runtime_state.sigma_threshold_k, runtime_state.sigma_threshold_xo))
 
     return fixed_sigma_cond
+
+
+def _maybe_adjust_overaggressive_p_filter_after_x_read(
+    runtime_state,
+    filter_gene_set_p,
+    increase_filter_gene_set_p,
+    filter_using_phewas,
+):
+    if filter_gene_set_p is None or increase_filter_gene_set_p is None or runtime_state.p_values is None or runtime_state.p_values_ignored is None:
+        return
+
+    # Since we required each batch to have increase_filter_gene_set_p, we may need to reduce.
+    if float(len(runtime_state.p_values)) / (len(runtime_state.p_values) + len(runtime_state.p_values_ignored)) > increase_filter_gene_set_p:
+        keep_frac = increase_filter_gene_set_p * float(len(runtime_state.p_values) + len(runtime_state.p_values_ignored)) / len(runtime_state.p_values)
+        p_from_quantile = np.quantile(runtime_state.p_values, keep_frac)
+        if p_from_quantile > filter_gene_set_p and not filter_using_phewas:
+            overcorrect_ignore = runtime_state.p_values > p_from_quantile
+            if np.sum(overcorrect_ignore) > 0:
+                overcorrect_mask = ~overcorrect_ignore
+                runtime_state._record_param("adjusted_filter_gene_set_p", p_from_quantile)
+                log(
+                    "Ignoring %d gene sets due to p > %.3g (overaggressive adjustment of p-value filters; kept %d)"
+                    % (np.sum(overcorrect_ignore), p_from_quantile, np.sum(overcorrect_mask))
+                )
+                runtime_state.subset_gene_sets(overcorrect_mask, ignore_missing=True, keep_missing=False, skip_V=True)
+
+
+def _apply_post_read_gene_set_size_and_qc_filters(
+    runtime_state,
+    min_gene_set_size,
+    max_gene_set_size,
+    filter_gene_set_metric_z,
+):
+    if runtime_state.X_orig is None:
+        return
+
+    col_sums = runtime_state.get_col_sums(runtime_state.X_orig, num_nonzero=True)
+    size_ignore = col_sums < min_gene_set_size
+    if np.sum(size_ignore) > 0:
+        size_mask = ~size_ignore
+        log("Ignoring %d gene sets due to too few genes (kept %d)" % (np.sum(size_ignore), np.sum(size_mask)))
+        runtime_state.subset_gene_sets(size_mask, keep_missing=False, skip_V=True)
+
+    col_sums = runtime_state.get_col_sums(runtime_state.X_orig, num_nonzero=True)
+    size_ignore = col_sums > max_gene_set_size
+    if np.sum(size_ignore) > 0:
+        size_mask = ~size_ignore
+        log("Ignoring %d gene sets due to too many genes (kept %d)" % (np.sum(size_ignore), np.sum(size_mask)))
+        runtime_state.subset_gene_sets(size_mask, keep_missing=False, skip_V=True)
+
+    if runtime_state.total_qc_metrics is not None and filter_gene_set_metric_z:
+        filter_mask = np.abs(runtime_state.mean_qc_metrics) < filter_gene_set_metric_z
+        filter_ignore = ~filter_mask
+        log("Ignoring %d gene sets due to QC metric filters (kept %d)" % (np.sum(filter_ignore), np.sum(filter_mask)))
+        runtime_state.subset_gene_sets(filter_mask, keep_missing=False, ignore_missing=True, skip_V=True)
+
+
+def _maybe_filter_zero_uncorrected_betas_after_x_read(
+    runtime_state,
+    sort_rank,
+    skip_betas,
+    filter_gene_set_p,
+    filter_using_phewas,
+    max_num_burn_in,
+    max_num_iter_betas,
+    min_num_iter_betas,
+    num_chains_betas,
+    r_threshold_burn_in_betas,
+    use_max_r_for_convergence_betas,
+    max_frac_sem_betas,
+    max_allowed_batch_correlation,
+    sparse_solution,
+    sparse_frac_betas,
+):
+    if skip_betas or runtime_state.p_values is None or filter_gene_set_p >= 1 or filter_using_phewas:
+        return sort_rank
+
+    # Remove features with identically zero uncorrected effects.
+    betas, _avg_postp = runtime_state._calculate_non_inf_betas(
+        initial_p=None,
+        assume_independent=True,
+        max_num_burn_in=max_num_burn_in,
+        max_num_iter=max_num_iter_betas,
+        min_num_iter=min_num_iter_betas,
+        num_chains=num_chains_betas,
+        r_threshold_burn_in=r_threshold_burn_in_betas,
+        use_max_r_for_convergence=use_max_r_for_convergence_betas,
+        max_frac_sem=max_frac_sem_betas,
+        max_allowed_batch_correlation=max_allowed_batch_correlation,
+        gauss_seidel=False,
+        update_hyper_sigma=False,
+        update_hyper_p=False,
+        adjust_hyper_sigma_p=False,
+        sparse_solution=sparse_solution,
+        sparse_frac_betas=sparse_frac_betas,
+    )
+
+    log("%d have betas uncorrected equal 0" % np.sum(betas == 0))
+    log("%d have betas uncorrected below 0.001" % np.sum(betas < 0.001))
+    log("%d have betas uncorrected below 0.01" % np.sum(betas < 0.01))
+
+    beta_ignore = betas == 0
+    beta_mask = ~beta_ignore
+    if np.sum(beta_mask) > 0:
+        log("Ignoring %d gene sets due to zero uncorrected betas (kept %d)" % (np.sum(beta_ignore), np.sum(beta_mask)))
+        runtime_state.subset_gene_sets(beta_mask, keep_missing=False, ignore_missing=True, skip_V=True)
+    else:
+        log("Keeping %d gene sets with zero uncorrected betas to avoid having none" % (np.sum(beta_ignore)))
+
+    return -np.abs(betas[beta_mask])
+
+
+def _maybe_reduce_gene_sets_to_max_after_x_read(
+    runtime_state,
+    skip_betas,
+    max_num_gene_sets,
+    sort_rank,
+):
+    if skip_betas or max_num_gene_sets is None or max_num_gene_sets <= 0:
+        return
+    if len(runtime_state.gene_sets) <= max_num_gene_sets:
+        return
+
+    log(
+        "Current %d gene sets is greater than the maximum specified %d; reducing using pruning + small beta removal"
+        % (len(runtime_state.gene_sets), max_num_gene_sets),
+        DEBUG,
+    )
+    gene_set_masks = runtime_state._compute_gene_set_batches(
+        V=None,
+        X_orig=runtime_state.X_orig,
+        mean_shifts=runtime_state.mean_shifts,
+        scale_factors=runtime_state.scale_factors,
+        sort_values=sort_rank,
+        resort_as_added=True,
+        stop_at=max_num_gene_sets,
+    )
+    keep_mask = np.full(len(runtime_state.gene_sets), False)
+    for gene_set_mask in gene_set_masks:
+        keep_mask[gene_set_mask] = True
+        log("Adding %d relatively uncorrelated gene sets (total now %d)" % (np.sum(gene_set_mask), np.sum(keep_mask)), TRACE)
+        if np.sum(keep_mask) > max_num_gene_sets:
+            break
+    if np.sum(keep_mask) > max_num_gene_sets:
+        keep_indices = np.where(keep_mask)[0]
+        if sort_rank is not None:
+            keep_indices = keep_indices[np.argsort(sort_rank[keep_indices], kind="stable")]
+        trimmed_keep_mask = np.full(len(runtime_state.gene_sets), False)
+        trimmed_keep_mask[keep_indices[:max_num_gene_sets]] = True
+        keep_mask = trimmed_keep_mask
+    if np.sum(~keep_mask) > 0:
+        runtime_state.subset_gene_sets(keep_mask, keep_missing=False, ignore_missing=True, skip_V=True)
 
 
 GeneSetData = EagglState
