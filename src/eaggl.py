@@ -8874,7 +8874,8 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
         log("Will read %d gene sets" % (len(gene_set_ids)), DEBUG)
 
     # Only read matrix inputs in EAGGL. No beta/prior/Gibbs fitting.
-    g.read_X(
+    _run_read_x_stage(
+        g,
         options.X_in,
         Xd_in=options.Xd_in,
         X_list=options.X_list,
@@ -8950,6 +8951,11 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
     if mode_state["run_factor"]:
         factor_input_state = _load_factor_phewas_inputs(g, options)
     return factor_input_state
+
+
+def _run_read_x_stage(runtime, X_in, **read_x_kwargs):
+    # Transitional stage entrypoint: main pipeline no longer calls runtime.read_X directly.
+    return type(runtime).read_X(runtime, X_in, **read_x_kwargs)
 
 
 def _log_runtime_environment_if_requested(options):
