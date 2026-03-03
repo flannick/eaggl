@@ -215,7 +215,7 @@ raise SystemExit("expected _read_correlations to fail fast before file IO")
         proc = self._run("factor", "--gwas-in", "dummy.tsv")
         self.assertNotEqual(proc.returncode, 0)
         err = (proc.stderr or "") + (proc.stdout or "")
-        self.assertIn("belong to pigean.py", err)
+        self.assertIn("moved to pigean.py", err)
 
 
 if __name__ == "__main__":

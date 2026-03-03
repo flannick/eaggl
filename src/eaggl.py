@@ -499,6 +499,18 @@ def _json_safe(_value):
     return pegs_json_safe(_value)
 
 REMOVED_OPTION_REPLACEMENTS = {
+    # PIGEAN-owned raw input modes/expansion controls are not supported in EAGGL.
+    "gwas_in": "__MOVED_TO_PIGEAN",
+    "huge_statistics_in": "__MOVED_TO_PIGEAN",
+    "huge_statistics_out": "__MOVED_TO_PIGEAN",
+    "credible_sets_in": "__MOVED_TO_PIGEAN",
+    "s2g_in": "__MOVED_TO_PIGEAN",
+    "exomes_in": "__MOVED_TO_PIGEAN",
+    "case_counts_in": "__MOVED_TO_PIGEAN",
+    "ctrl_counts_in": "__MOVED_TO_PIGEAN",
+    "add_gene_sets_by_naive": "__MOVED_TO_PIGEAN",
+    "add_gene_sets_by_gibbs": "__MOVED_TO_PIGEAN",
+
     "gene_bfs_in": "--gene-stats-in",
     "gene_bfs_id_col": "--gene-stats-id-col",
     "gene_bfs_log_bf_col": "--gene-stats-log-bf-col",
@@ -14940,42 +14952,6 @@ def _build_main_mode_state():
 def _enforce_factor_only_input_boundary(options, mode_state):
     if not mode_state.get("run_factor"):
         return
-
-    forbidden_raw_inputs = []
-    if options.gwas_in is not None:
-        forbidden_raw_inputs.append("--gwas-in")
-    if options.huge_statistics_in is not None:
-        forbidden_raw_inputs.append("--huge-statistics-in")
-    if options.huge_statistics_out is not None:
-        forbidden_raw_inputs.append("--huge-statistics-out")
-    if options.exomes_in is not None:
-        forbidden_raw_inputs.append("--exomes-in")
-    if options.positive_controls_in is not None:
-        forbidden_raw_inputs.append("--positive-controls-in")
-    if options.positive_controls_list is not None:
-        forbidden_raw_inputs.append("--positive-controls-list")
-    if options.positive_controls_all_in is not None:
-        forbidden_raw_inputs.append("--positive-controls-all-in")
-    if options.case_counts_in is not None:
-        forbidden_raw_inputs.append("--case-counts-in")
-    if options.ctrl_counts_in is not None:
-        forbidden_raw_inputs.append("--ctrl-counts-in")
-    if options.s2g_in is not None:
-        forbidden_raw_inputs.append("--s2g-in")
-    if options.credible_sets_in is not None:
-        forbidden_raw_inputs.append("--credible-sets-in")
-
-    if options.add_gene_sets_by_naive is not None:
-        forbidden_raw_inputs.append("--add-gene-sets-by-naive")
-    if options.add_gene_sets_by_gibbs is not None:
-        forbidden_raw_inputs.append("--add-gene-sets-by-gibbs")
-
-    if len(forbidden_raw_inputs) > 0:
-        bail(
-            "These inputs belong to pigean.py and are not supported in eaggl.py: %s. "
-            "Run pigean.py first and pass outputs via --eaggl-bundle-in or --gene-stats-in/--gene-set-stats-in."
-            % ", ".join(sorted(forbidden_raw_inputs))
-        )
 
     has_x_source = any(
         x is not None
