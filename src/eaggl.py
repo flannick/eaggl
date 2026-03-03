@@ -8938,13 +8938,25 @@ class FactorOnlyStageResult:
 
 
 @dataclass
+class PhewasStageResult:
+    ran: bool = False
+    output_path: str | None = None
+
+
+@dataclass
+class FactorStageResult:
+    ran: bool = False
+    workflow_id: str | None = None
+
+
+@dataclass
 class MainPipelineResult:
     state: object
     mode_state: dict
     factor_only: FactorOnlyStageResult
-    ran_phewas: bool = False
-    ran_factor: bool = False
-    ran_factor_phewas: bool = False
+    phewas: PhewasStageResult = field(default_factory=PhewasStageResult)
+    factor: FactorStageResult = field(default_factory=FactorStageResult)
+    factor_phewas: PhewasStageResult = field(default_factory=PhewasStageResult)
 
 
 def _enforce_factor_only_input_boundary(options, mode_state):
@@ -9209,6 +9221,7 @@ def _run_main_phewas_stage(g, options):
     _run_phewas_with_common_args(g, options, bfs_to_use, run_for_factors=False)
     if options.phewas_stats_out:
         g.write_phewas_statistics(options.phewas_stats_out)
+    return PhewasStageResult(ran=True, output_path=options.phewas_stats_out)
 
 
 def _run_main_factor_stage(g, options, mode_state, factor_input_state):
@@ -9220,6 +9233,9 @@ def _run_main_factor_stage(g, options, mode_state, factor_input_state):
         gene_or_pheno_filter_value = options.gene_filter_value
 
     g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state["anchor_pheno_mask"], anchor_gene_mask=factor_input_state["anchor_gene_mask"], anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, lmm_provider=options.lmm_provider, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+    workflow = mode_state.get("factor_workflow") if isinstance(mode_state, dict) else None
+    workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
+    return FactorStageResult(ran=True, workflow_id=workflow_id)
 
 
 def _write_main_factor_outputs(g, options):
@@ -9238,7 +9254,7 @@ def _write_main_factor_outputs(g, options):
 def _run_main_factor_phewas_stage(g, options):
     if g.num_factors() <= 0:
         log("No factors; not performing factor phewas")
-        return
+        return PhewasStageResult(ran=False, output_path=options.factor_phewas_stats_out)
 
     bfs_to_use = _resolve_gene_phewas_input_for_stage(
         g,
@@ -9254,6 +9270,7 @@ def _run_main_factor_phewas_stage(g, options):
     )
     if options.factor_phewas_stats_out:
         g.write_factor_phewas_statistics(options.factor_phewas_stats_out)
+    return PhewasStageResult(ran=True, output_path=options.factor_phewas_stats_out)
 
 
 def _should_run_main_factor_phewas_stage(mode_state):
@@ -10230,7 +10247,7 @@ def run_main_pipeline(options):
     g = EagglState(background_prior=options.background_prior, batch_size=options.batch_size)
     _initialize_main_mappings(g, options)
     factor_input_state = _run_main_factor_only_pipeline(g, options, mode_state)
-    factor_stage_result = FactorOnlyStageResult(
+    factor_only_stage_result = FactorOnlyStageResult(
         ran=True,
         num_gene_sets=len(g.gene_sets) if g.gene_sets is not None else 0,
         factor_input_state=factor_input_state,
@@ -10238,22 +10255,19 @@ def run_main_pipeline(options):
 
     _write_main_primary_outputs(g, options)
 
-    ran_phewas = False
+    phewas_stage_result = PhewasStageResult(ran=False, output_path=options.phewas_stats_out)
     if mode_state["run_phewas"]:
-        _run_main_phewas_stage(g, options)
-        ran_phewas = True
+        phewas_stage_result = _run_main_phewas_stage(g, options)
 
-    ran_factor = False
+    factor_model_stage_result = FactorStageResult(ran=False, workflow_id=None)
     if mode_state["run_factor"]:
-        _run_main_factor_stage(g, options, mode_state, factor_input_state)
-        ran_factor = True
+        factor_model_stage_result = _run_main_factor_stage(g, options, mode_state, factor_input_state)
 
     _write_main_factor_outputs(g, options)
 
-    ran_factor_phewas = False
+    factor_phewas_stage_result = PhewasStageResult(ran=False, output_path=options.factor_phewas_stats_out)
     if _should_run_main_factor_phewas_stage(mode_state):
-        _run_main_factor_phewas_stage(g, options)
-        ran_factor_phewas = True
+        factor_phewas_stage_result = _run_main_factor_phewas_stage(g, options)
 
 
     if options.params_out:
@@ -10262,10 +10276,10 @@ def run_main_pipeline(options):
     return MainPipelineResult(
         state=g,
         mode_state=mode_state,
-        factor_only=factor_stage_result,
-        ran_phewas=ran_phewas,
-        ran_factor=ran_factor,
-        ran_factor_phewas=ran_factor_phewas,
+        factor_only=factor_only_stage_result,
+        phewas=phewas_stage_result,
+        factor=factor_model_stage_result,
+        factor_phewas=factor_phewas_stage_result,
     )
 
 
