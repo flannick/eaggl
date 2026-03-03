@@ -1510,336 +1510,6 @@ class EagglState(object):
                     gene_label_map[orig_gene] = new_gene
         return gene_label_map
 
-    def read_Y(self, gwas_in=None, huge_statistics_in=None, huge_statistics_out=None, exomes_in=None, positive_controls_in=None, positive_controls_list=None, case_counts_in=None, ctrl_counts_in=None, gene_bfs_in=None, gene_loc_file=None, gene_covs_in=None, hold_out_chrom=None, **kwargs):
-
-        unsupported_flags = []
-        if gwas_in is not None:
-            unsupported_flags.append("--gwas-in")
-        if huge_statistics_in is not None:
-            unsupported_flags.append("--huge-statistics-in")
-        if huge_statistics_out is not None:
-            unsupported_flags.append("--huge-statistics-out")
-        if exomes_in is not None:
-            unsupported_flags.append("--exomes-in")
-        if case_counts_in is not None:
-            unsupported_flags.append("--case-counts-in")
-        if ctrl_counts_in is not None:
-            unsupported_flags.append("--ctrl-counts-in")
-
-        if len(unsupported_flags) > 0:
-            bail(
-                "These inputs belong to pigean.py and are not supported in eaggl.py: %s. "
-                "Run pigean.py first and pass outputs via --eaggl-bundle-in or --gene-stats-in/--gene-set-stats-in."
-                % ", ".join(sorted(unsupported_flags))
-            )
-
-        if positive_controls_in is not None or positive_controls_list is not None:
-            warn("Ignoring positive-control inputs in eaggl.py read_Y; using --gene-stats-in values")
-
-        if gene_bfs_in is None:
-            bail("Require --gene-stats-in for this operation")
-
-        (Y1, extra_genes, extra_Y, gene_combined_map, gene_prior_map) = self._read_gene_bfs(gene_bfs_in, **kwargs)
-
-        def _apply_hold_out_chrom(Y_values, extra_gene_names, extra_Y_values):
-            if hold_out_chrom is None:
-                return (Y_values, extra_gene_names, extra_Y_values)
-
-            if self.gene_to_chrom is None:
-                if gene_loc_file is None:
-                    bail("Option --hold-out-chrom requires --gene-loc-file")
-                (self.gene_chrom_name_pos, self.gene_to_chrom, self.gene_to_pos) = self._read_loc_file(gene_loc_file)
-
-            Y_values = np.array(Y_values, dtype=float)
-            extra_gene_names = list(extra_gene_names)
-            extra_Y_values = np.array(extra_Y_values, dtype=float)
-
-            if self.genes is not None:
-                Y_nan_mask = np.full(len(Y_values), False)
-                for i, gene in enumerate(self.genes):
-                    if gene in self.gene_to_chrom and self.gene_to_chrom[gene] == hold_out_chrom:
-                        Y_nan_mask[i] = True
-                if np.sum(Y_nan_mask) > 0:
-                    Y_values[Y_nan_mask] = np.nan
-
-            if len(extra_gene_names) > 0:
-                keep_mask = np.full(len(extra_gene_names), True)
-                for i, gene in enumerate(extra_gene_names):
-                    if gene in self.gene_to_chrom and self.gene_to_chrom[gene] == hold_out_chrom:
-                        keep_mask[i] = False
-                if np.sum(~keep_mask) > 0:
-                    extra_gene_names = [extra_gene_names[i] for i in range(len(extra_gene_names)) if keep_mask[i]]
-                    extra_Y_values = extra_Y_values[keep_mask]
-
-            return (Y_values, extra_gene_names, extra_Y_values)
-
-        (Y1, extra_genes, extra_Y) = _apply_hold_out_chrom(Y1, extra_genes, extra_Y)
-        Y1_for_regression = copy.copy(Y1)
-        extra_Y_for_regression = copy.copy(extra_Y)
-
-        if self.genes is None:
-            genes_union = []
-            seen = set()
-            for gene in extra_genes:
-                if gene not in seen:
-                    genes_union.append(gene)
-                    seen.add(gene)
-
-            self._set_X(self.X_orig, genes_union, self.gene_sets, skip_N=False)
-            Y = np.array(extra_Y, dtype=float)
-            Y_for_regression = np.array(extra_Y_for_regression, dtype=float)
-            extra_genes = []
-            extra_Y = np.array([])
-            extra_Y_for_regression = np.array([])
-        else:
-            missing_value = np.nanmean(Y1) if len(Y1) > 0 else 0.0
-            Y = np.array(Y1, dtype=float)
-            Y[np.isnan(Y)] = missing_value
-            Y_for_regression = np.array(Y1_for_regression, dtype=float)
-            Y_for_regression[np.isnan(Y_for_regression)] = missing_value
-
-        if len(extra_Y) > 0:
-            Y = np.concatenate((Y, extra_Y))
-            Y_for_regression = np.concatenate((Y_for_regression, extra_Y_for_regression))
-
-            if self.X_orig is not None:
-                self._set_X(
-                    sparse.csc_matrix(
-                        (self.X_orig.data, self.X_orig.indices, self.X_orig.indptr),
-                        shape=(self.X_orig.shape[0] + len(extra_Y), self.X_orig.shape[1]),
-                    ),
-                    self.genes,
-                    self.gene_sets,
-                    skip_V=True,
-                    skip_scale_factors=True,
-                    skip_N=False,
-                )
-
-            if self.genes is not None:
-                self._set_X(self.X_orig, self.genes + extra_genes, self.gene_sets, skip_N=False)
-
-        self._set_Y(Y, Y_for_regression, skip_V=True, skip_scale_factors=True)
-
-        if gene_combined_map is not None:
-            self.combined_prior_Ys = copy.copy(self.Y)
-            for i, gene in enumerate(self.genes):
-                if gene in gene_combined_map:
-                    self.combined_prior_Ys[i] = gene_combined_map[gene]
-
-        if gene_prior_map is not None:
-            self.priors = np.zeros(len(self.genes))
-            for i, gene in enumerate(self.genes):
-                if gene in gene_prior_map:
-                    self.priors[i] = gene_prior_map[gene]
-
-        if gene_covs_in is not None:
-            (cov_names, gene_covs, _, _) = self._read_gene_covs(gene_covs_in, **kwargs)
-            cov_dirs = np.array([0] * len(cov_names))
-
-            col_means = np.nanmean(gene_covs, axis=0)
-            nan_indices = np.where(np.isnan(gene_covs))
-            gene_covs[nan_indices] = np.take(col_means, nan_indices[1])
-
-            if self.gene_covariates is not None:
-                assert(gene_covs.shape[0] == self.gene_covariates.shape[0])
-                self.gene_covariates = np.hstack((self.gene_covariates, gene_covs))
-                self.gene_covariate_names = self.gene_covariate_names + cov_names
-                self.gene_covariate_directions = np.append(self.gene_covariate_directions, cov_dirs)
-            else:
-                self.gene_covariates = gene_covs
-                self.gene_covariate_names = cov_names
-                self.gene_covariate_directions = cov_dirs
-
-        if self.gene_covariates is not None:
-            constant_features = np.isclose(np.var(self.gene_covariates, axis=0), 0)
-            if np.sum(constant_features) > 0:
-                self.gene_covariates = self.gene_covariates[:, ~constant_features]
-                self.gene_covariate_names = [self.gene_covariate_names[i] for i in np.where(~constant_features)[0]]
-                self.gene_covariate_directions = np.array([self.gene_covariate_directions[i] for i in np.where(~constant_features)[0]])
-
-            prune_threshold = 0.95
-            cor_mat = np.abs(np.corrcoef(self.gene_covariates.T))
-            np.fill_diagonal(cor_mat, 0)
-
-            while True:
-                if np.max(cor_mat) < prune_threshold:
-                    try:
-                        np.linalg.inv(self.gene_covariates.T.dot(self.gene_covariates))
-                        break
-                    except np.linalg.LinAlgError:
-                        pass
-
-                max_index = np.unravel_index(np.argmax(cor_mat), cor_mat.shape)
-                if np.max(max_index) == self.gene_covariate_intercept_index:
-                    max_index = np.min(max_index)
-                else:
-                    max_index = np.max(max_index)
-
-                log("Removing feature %s" % self.gene_covariate_names[max_index], TRACE)
-                self.gene_covariates = np.delete(self.gene_covariates, max_index, axis=1)
-                del self.gene_covariate_names[max_index]
-                self.gene_covariate_directions = np.delete(self.gene_covariate_directions, max_index)
-                cor_mat = np.delete(np.delete(cor_mat, max_index, axis=1), max_index, axis=0)
-                if len(self.gene_covariates) == 0:
-                    bail("Error: something went wrong with matrix inversion. Still couldn't invert after removing all but one column")
-
-            self.gene_covariate_intercept_index = np.where(np.isclose(np.var(self.gene_covariates, axis=0), 0))[0]
-            if len(self.gene_covariate_intercept_index) == 0:
-                self.gene_covariates = np.hstack((self.gene_covariates, np.ones(self.gene_covariates.shape[0])[:, np.newaxis]))
-                self.gene_covariate_names.append("intercept")
-                self.gene_covariate_directions = np.append(self.gene_covariate_directions, 0)
-                self.gene_covariate_intercept_index = len(self.gene_covariate_names) - 1
-            else:
-                self.gene_covariate_intercept_index = self.gene_covariate_intercept_index[0]
-
-            covariate_means = np.mean(self.gene_covariates, axis=0)
-            covariate_sds = np.std(self.gene_covariates, axis=0)
-            covariate_sds[covariate_sds == 0] = 1
-
-            self.gene_covariates_mask = np.all(self.gene_covariates < covariate_means + 5 * covariate_sds, axis=1)
-            self.gene_covariates_mat_inv = np.linalg.inv(self.gene_covariates[self.gene_covariates_mask, :].T.dot(self.gene_covariates[self.gene_covariates_mask, :]))
-            gene_covariate_sds = np.std(self.gene_covariates, axis=0)
-            gene_covariate_sds[gene_covariate_sds == 0] = 1
-            self.gene_covariate_zs = (self.gene_covariates - np.mean(self.gene_covariates, axis=0)) / gene_covariate_sds
-
-            Y_for_regression = self.Y_for_regression
-            if self.Y_for_regression is not None:
-                (Y_for_regression, _, _) = self._correct_huge(
-                    self.Y_for_regression,
-                    self.gene_covariates,
-                    self.gene_covariates_mask,
-                    self.gene_covariates_mat_inv,
-                    self.gene_covariate_names,
-                    self.gene_covariate_intercept_index,
-                )
-
-            (Y, self.Y_uncorrected, _) = self._correct_huge(
-                self.Y,
-                self.gene_covariates,
-                self.gene_covariates_mask,
-                self.gene_covariates_mat_inv,
-                self.gene_covariate_names,
-                self.gene_covariate_intercept_index,
-            )
-
-            self._set_Y(Y, Y_for_regression, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts)
-            self.gene_covariate_adjustments = self.Y_for_regression - self.Y_uncorrected
-
-    #Initialize the matrices, genes, and gene sets
-    #This can be called multiple times; it will subset the current matrices down to the new set of gene sets
-    #any information regarding *genes* though is overwritten -- there is no way to subset the old genes down to a new set of genes
-    #(although reading multiple files hasn't been tested thoroughly)
-    #Initialize the matrices, genes, and gene sets
-    #This can be called multiple times; it will subset the current matrices down to the new set of gene sets
-    #any information regarding *genes* though is overwritten -- there is no way to subset the old genes down to a new set of genes
-    #(although reading multiple files hasn't been tested thoroughly)
-    def read_X(self, X_in, Xd_in=None, X_list=None, Xd_list=None, V_in=None, skip_V=True, force_reread=False, min_gene_set_size=1, max_gene_set_size=30000, only_ids=None, only_inc_genes=None, fraction_inc_genes=None, add_all_genes=False, prune_gene_sets=0.8, weighted_prune_gene_sets=None, prune_deterministically=False, x_sparsify=[50,100,200,500,1000], add_ext=False, add_top=True, add_bottom=True, filter_negative=True, threshold_weights=0.5, cap_weights=True, permute_gene_sets=False, max_gene_set_p=None, filter_gene_set_p=1, filter_using_phewas=False, increase_filter_gene_set_p=0.01, max_num_gene_sets_initial=None, max_num_gene_sets=None, max_num_gene_sets_hyper=None, skip_betas=False, run_logistic=True, max_for_linear=0.95, filter_gene_set_metric_z=2.5, initial_p=0.01, xin_to_p_noninf_ind=None, initial_sigma2=1e-3, initial_sigma2_cond=None, sigma_power=0, sigma_soft_threshold_95=None, sigma_soft_threshold_5=None, run_gls=False, run_corrected_ols=False, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, update_hyper_p=False, update_hyper_sigma=False, batch_all_for_hyper=False, first_for_hyper=False, first_max_p_for_hyper=False, first_for_sigma_cond=False, sigma_num_devs_to_top=2.0, p_noninf_inflate=1, batch_separator="@", ignore_genes=set(["NA"]), file_separator=None, max_num_burn_in=None, max_num_iter_betas=1100, min_num_iter_betas=10, num_chains_betas=10, r_threshold_burn_in_betas=1.01, use_max_r_for_convergence_betas=True, max_frac_sem_betas=0.01, max_allowed_batch_correlation=None, sparse_solution=False, sparse_frac_betas=None, betas_trace_out=None, show_progress=True, max_num_entries_at_once=None):
-        if not force_reread and self.X_orig is not None:
-            return
-
-        if filter_using_phewas and self.gene_pheno_Y is None:
-            filter_using_phewas = False
-
-        self._set_X(None, self.genes, None, skip_N=True)
-        self._record_params({
-            "filter_gene_set_p": filter_gene_set_p,
-            "filter_negative": filter_negative,
-            "threshold_weights": threshold_weights,
-            "cap_weights": cap_weights,
-            "max_num_gene_sets_initial": max_num_gene_sets_initial,
-            "max_num_gene_sets": max_num_gene_sets,
-            "max_num_gene_sets_hyper": max_num_gene_sets_hyper,
-            "filter_gene_set_metric_z": filter_gene_set_metric_z,
-            "num_chains_betas": num_chains_betas,
-            "sigma_num_devs_to_top": sigma_num_devs_to_top,
-            "p_noninf_inflate": p_noninf_inflate,
-        })
-
-        x_input_plan = pegs_prepare_read_x_inputs(
-            X_in=X_in,
-            X_list=X_list,
-            Xd_in=Xd_in,
-            Xd_list=Xd_list,
-            initial_p=initial_p,
-            xin_to_p_noninf_ind=xin_to_p_noninf_ind,
-            batch_separator=batch_separator,
-            file_separator=file_separator,
-            sparse_list_open_fn=open_gz,
-            dense_list_open_fn=open,
-        )
-        xdata_seed = pegs_xdata_from_input_plan(x_input_plan)
-
-        read_x_config = PegsXReadConfig(
-            x_sparsify=x_sparsify,
-            min_gene_set_size=min_gene_set_size,
-            add_ext=add_ext,
-            add_top=add_top,
-            add_bottom=add_bottom,
-            threshold_weights=threshold_weights,
-            cap_weights=cap_weights,
-            permute_gene_sets=permute_gene_sets,
-            filter_gene_set_p=filter_gene_set_p,
-            filter_gene_set_metric_z=filter_gene_set_metric_z,
-            filter_using_phewas=filter_using_phewas,
-            increase_filter_gene_set_p=increase_filter_gene_set_p,
-            filter_negative=filter_negative,
-        )
-        read_x_callbacks = PegsXReadCallbacks(
-            sparse_module=sparse,
-            np_module=np,
-            normalize_dense_gene_rows_fn=_normalize_dense_gene_rows,
-            build_sparse_x_from_dense_input_fn=_build_sparse_x_from_dense_input,
-            reindex_x_rows_to_current_genes_fn=_reindex_x_rows_to_current_genes,
-            normalize_gene_set_weights_fn=_normalize_gene_set_weights,
-            partition_missing_gene_rows_fn=_partition_missing_gene_rows,
-            maybe_permute_gene_set_rows_fn=_maybe_permute_gene_set_rows,
-            maybe_prefilter_x_block_fn=_maybe_prefilter_x_block,
-            merge_missing_gene_rows_fn=_merge_missing_gene_rows,
-            finalize_added_x_block_fn=_finalize_added_x_block,
-        )
-
-        ingestion_options = pegs_build_read_x_ingestion_options(locals())
-        ingestion_state = xdata_seed.run_ingestion_stage(
-            self,
-            input_plan=x_input_plan,
-            read_config=read_x_config,
-            read_callbacks=read_x_callbacks,
-            ingestion_options=ingestion_options,
-            ensure_gene_universe_fn=_ensure_gene_universe_for_x,
-            process_x_input_file_fn=_process_x_input_file,
-            remove_tag_from_input_fn=_remove_tag_from_input,
-            log_fn=log,
-            info_level=INFO,
-            debug_level=DEBUG,
-        )
-
-        post_options = pegs_build_read_x_post_options(
-            locals(),
-            batches=ingestion_state["batches"],
-            num_ignored_gene_sets=ingestion_state["num_ignored_gene_sets"],
-            ignored_for_fraction_inc=ingestion_state["ignored_for_fraction_inc"],
-        )
-        post_callbacks = PegsXReadPostCallbacks(
-            standardize_qc_metrics_after_x_read_fn=_standardize_qc_metrics_after_x_read,
-            maybe_correct_gene_set_betas_after_x_read_fn=_maybe_correct_gene_set_betas_after_x_read,
-            maybe_limit_initial_gene_sets_by_p_fn=_maybe_limit_initial_gene_sets_by_p,
-            maybe_prune_gene_sets_after_x_read_fn=_maybe_prune_gene_sets_after_x_read,
-            initialize_hyper_defaults_after_x_read_fn=_initialize_hyper_defaults_after_x_read,
-            maybe_learn_batch_hyper_after_x_read_fn=_maybe_learn_batch_hyper_after_x_read,
-            maybe_adjust_overaggressive_p_filter_after_x_read_fn=_maybe_adjust_overaggressive_p_filter_after_x_read,
-            apply_post_read_gene_set_size_and_qc_filters_fn=_apply_post_read_gene_set_size_and_qc_filters,
-            maybe_filter_zero_uncorrected_betas_after_x_read_fn=_maybe_filter_zero_uncorrected_betas_after_x_read,
-            maybe_reduce_gene_sets_to_max_after_x_read_fn=_maybe_reduce_gene_sets_to_max_after_x_read,
-            record_read_x_counts_fn=pegs_record_read_x_counts,
-        )
-        xdata_seed.run_post_stage(
-            self,
-            post_options=post_options,
-            post_callbacks=post_callbacks,
-            log_fn=log,
-            debug_level=DEBUG,
-        )
-
     #this reads a V matrix directly from a file
     #it does not initialize an X matrix; if the X-matrix is needed, read_X should be used instead
     def calculate_huge_scores_gwas(self, gwas_in, gwas_chrom_col=None, gwas_pos_col=None, gwas_p_col=None, gene_loc_file=None, hold_out_chrom=None, exons_loc_file=None, gwas_beta_col=None, gwas_se_col=None, gwas_n_col=None, gwas_n=None, gwas_freq_col=None, gwas_filter_col=None, gwas_filter_value=None, gwas_locus_col=None, gwas_ignore_p_threshold=None, gwas_units=None, gwas_low_p=5e-8, gwas_high_p=1e-2, gwas_low_p_posterior=0.98, gwas_high_p_posterior=0.001, detect_low_power=None, detect_high_power=None, detect_adjust_huge=False, learn_window=False, closest_gene_prob=0.7, max_closest_gene_prob=0.9, scale_raw_closest_gene=True, cap_raw_closest_gene=False, cap_region_posterior=True, scale_region_posterior=False, phantom_region_posterior=False, allow_evidence_of_absence=False, correct_huge=True, max_signal_p=1e-5, signal_window_size=250000, signal_min_sep=100000, signal_max_logp_ratio=None, credible_set_span=25000, max_closest_gene_dist=2.5e5, min_n_ratio=0.5, max_clump_ld=0.2, min_var_posterior=0.01, s2g_in=None, s2g_chrom_col=None, s2g_pos_col=None, s2g_gene_col=None, s2g_prob_col=None, s2g_normalize_values=None, credible_sets_in=None, credible_sets_id_col=None, credible_sets_chrom_col=None, credible_sets_pos_col=None, credible_sets_ppa_col=None, **kwargs):
@@ -8916,7 +8586,8 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
         sys.exit(0)
 
     if options.gene_stats_in is not None:
-        g.read_Y(
+        _run_read_y_stage(
+            g,
             gene_bfs_in=options.gene_stats_in,
             show_progress=not options.hide_progress,
             gene_bfs_id_col=options.gene_stats_id_col,
@@ -8953,9 +8624,335 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
     return factor_input_state
 
 
+def _run_read_y_stage(runtime, **read_kwargs):
+    return _read_y_pipeline(runtime, **read_kwargs)
+
+
+def _read_y_pipeline(runtime, gwas_in=None, huge_statistics_in=None, huge_statistics_out=None, exomes_in=None, positive_controls_in=None, positive_controls_list=None, case_counts_in=None, ctrl_counts_in=None, gene_bfs_in=None, gene_loc_file=None, gene_covs_in=None, hold_out_chrom=None, **kwargs):
+    unsupported_flags = []
+    if gwas_in is not None:
+        unsupported_flags.append("--gwas-in")
+    if huge_statistics_in is not None:
+        unsupported_flags.append("--huge-statistics-in")
+    if huge_statistics_out is not None:
+        unsupported_flags.append("--huge-statistics-out")
+    if exomes_in is not None:
+        unsupported_flags.append("--exomes-in")
+    if case_counts_in is not None:
+        unsupported_flags.append("--case-counts-in")
+    if ctrl_counts_in is not None:
+        unsupported_flags.append("--ctrl-counts-in")
+
+    if len(unsupported_flags) > 0:
+        bail(
+            "These inputs belong to pigean.py and are not supported in eaggl.py: %s. "
+            "Run pigean.py first and pass outputs via --eaggl-bundle-in or --gene-stats-in/--gene-set-stats-in."
+            % ", ".join(sorted(unsupported_flags))
+        )
+
+    if positive_controls_in is not None or positive_controls_list is not None:
+        warn("Ignoring positive-control inputs in eaggl.py read_Y; using --gene-stats-in values")
+
+    if gene_bfs_in is None:
+        bail("Require --gene-stats-in for this operation")
+
+    (Y1, extra_genes, extra_Y, gene_combined_map, gene_prior_map) = runtime._read_gene_bfs(gene_bfs_in, **kwargs)
+
+    def _apply_hold_out_chrom(Y_values, extra_gene_names, extra_Y_values):
+        if hold_out_chrom is None:
+            return (Y_values, extra_gene_names, extra_Y_values)
+
+        if runtime.gene_to_chrom is None:
+            if gene_loc_file is None:
+                bail("Option --hold-out-chrom requires --gene-loc-file")
+            (runtime.gene_chrom_name_pos, runtime.gene_to_chrom, runtime.gene_to_pos) = runtime._read_loc_file(gene_loc_file)
+
+        Y_values = np.array(Y_values, dtype=float)
+        extra_gene_names = list(extra_gene_names)
+        extra_Y_values = np.array(extra_Y_values, dtype=float)
+
+        if runtime.genes is not None:
+            Y_nan_mask = np.full(len(Y_values), False)
+            for i, gene in enumerate(runtime.genes):
+                if gene in runtime.gene_to_chrom and runtime.gene_to_chrom[gene] == hold_out_chrom:
+                    Y_nan_mask[i] = True
+            if np.sum(Y_nan_mask) > 0:
+                Y_values[Y_nan_mask] = np.nan
+
+        if len(extra_gene_names) > 0:
+            keep_mask = np.full(len(extra_gene_names), True)
+            for i, gene in enumerate(extra_gene_names):
+                if gene in runtime.gene_to_chrom and runtime.gene_to_chrom[gene] == hold_out_chrom:
+                    keep_mask[i] = False
+            if np.sum(~keep_mask) > 0:
+                extra_gene_names = [extra_gene_names[i] for i in range(len(extra_gene_names)) if keep_mask[i]]
+                extra_Y_values = extra_Y_values[keep_mask]
+
+        return (Y_values, extra_gene_names, extra_Y_values)
+
+    (Y1, extra_genes, extra_Y) = _apply_hold_out_chrom(Y1, extra_genes, extra_Y)
+    Y1_for_regression = copy.copy(Y1)
+    extra_Y_for_regression = copy.copy(extra_Y)
+
+    if runtime.genes is None:
+        genes_union = []
+        seen = set()
+        for gene in extra_genes:
+            if gene not in seen:
+                genes_union.append(gene)
+                seen.add(gene)
+
+        runtime._set_X(runtime.X_orig, genes_union, runtime.gene_sets, skip_N=False)
+        Y = np.array(extra_Y, dtype=float)
+        Y_for_regression = np.array(extra_Y_for_regression, dtype=float)
+        extra_genes = []
+        extra_Y = np.array([])
+        extra_Y_for_regression = np.array([])
+    else:
+        missing_value = np.nanmean(Y1) if len(Y1) > 0 else 0.0
+        Y = np.array(Y1, dtype=float)
+        Y[np.isnan(Y)] = missing_value
+        Y_for_regression = np.array(Y1_for_regression, dtype=float)
+        Y_for_regression[np.isnan(Y_for_regression)] = missing_value
+
+    if len(extra_Y) > 0:
+        Y = np.concatenate((Y, extra_Y))
+        Y_for_regression = np.concatenate((Y_for_regression, extra_Y_for_regression))
+
+        if runtime.X_orig is not None:
+            runtime._set_X(
+                sparse.csc_matrix(
+                    (runtime.X_orig.data, runtime.X_orig.indices, runtime.X_orig.indptr),
+                    shape=(runtime.X_orig.shape[0] + len(extra_Y), runtime.X_orig.shape[1]),
+                ),
+                runtime.genes,
+                runtime.gene_sets,
+                skip_V=True,
+                skip_scale_factors=True,
+                skip_N=False,
+            )
+
+        if runtime.genes is not None:
+            runtime._set_X(runtime.X_orig, runtime.genes + extra_genes, runtime.gene_sets, skip_N=False)
+
+    runtime._set_Y(Y, Y_for_regression, skip_V=True, skip_scale_factors=True)
+
+    if gene_combined_map is not None:
+        runtime.combined_prior_Ys = copy.copy(runtime.Y)
+        for i, gene in enumerate(runtime.genes):
+            if gene in gene_combined_map:
+                runtime.combined_prior_Ys[i] = gene_combined_map[gene]
+
+    if gene_prior_map is not None:
+        runtime.priors = np.zeros(len(runtime.genes))
+        for i, gene in enumerate(runtime.genes):
+            if gene in gene_prior_map:
+                runtime.priors[i] = gene_prior_map[gene]
+
+    if gene_covs_in is not None:
+        (cov_names, gene_covs, _, _) = runtime._read_gene_covs(gene_covs_in, **kwargs)
+        cov_dirs = np.array([0] * len(cov_names))
+
+        col_means = np.nanmean(gene_covs, axis=0)
+        nan_indices = np.where(np.isnan(gene_covs))
+        gene_covs[nan_indices] = np.take(col_means, nan_indices[1])
+
+        if runtime.gene_covariates is not None:
+            assert(gene_covs.shape[0] == runtime.gene_covariates.shape[0])
+            runtime.gene_covariates = np.hstack((runtime.gene_covariates, gene_covs))
+            runtime.gene_covariate_names = runtime.gene_covariate_names + cov_names
+            runtime.gene_covariate_directions = np.append(runtime.gene_covariate_directions, cov_dirs)
+        else:
+            runtime.gene_covariates = gene_covs
+            runtime.gene_covariate_names = cov_names
+            runtime.gene_covariate_directions = cov_dirs
+
+    if runtime.gene_covariates is not None:
+        constant_features = np.isclose(np.var(runtime.gene_covariates, axis=0), 0)
+        if np.sum(constant_features) > 0:
+            runtime.gene_covariates = runtime.gene_covariates[:, ~constant_features]
+            runtime.gene_covariate_names = [runtime.gene_covariate_names[i] for i in np.where(~constant_features)[0]]
+            runtime.gene_covariate_directions = np.array([runtime.gene_covariate_directions[i] for i in np.where(~constant_features)[0]])
+
+        prune_threshold = 0.95
+        cor_mat = np.abs(np.corrcoef(runtime.gene_covariates.T))
+        np.fill_diagonal(cor_mat, 0)
+
+        while True:
+            if np.max(cor_mat) < prune_threshold:
+                try:
+                    np.linalg.inv(runtime.gene_covariates.T.dot(runtime.gene_covariates))
+                    break
+                except np.linalg.LinAlgError:
+                    pass
+
+            max_index = np.unravel_index(np.argmax(cor_mat), cor_mat.shape)
+            if np.max(max_index) == runtime.gene_covariate_intercept_index:
+                max_index = np.min(max_index)
+            else:
+                max_index = np.max(max_index)
+
+            log("Removing feature %s" % runtime.gene_covariate_names[max_index], TRACE)
+            runtime.gene_covariates = np.delete(runtime.gene_covariates, max_index, axis=1)
+            del runtime.gene_covariate_names[max_index]
+            runtime.gene_covariate_directions = np.delete(runtime.gene_covariate_directions, max_index)
+            cor_mat = np.delete(np.delete(cor_mat, max_index, axis=1), max_index, axis=0)
+            if len(runtime.gene_covariates) == 0:
+                bail("Error: something went wrong with matrix inversion. Still couldn't invert after removing all but one column")
+
+        runtime.gene_covariate_intercept_index = np.where(np.isclose(np.var(runtime.gene_covariates, axis=0), 0))[0]
+        if len(runtime.gene_covariate_intercept_index) == 0:
+            runtime.gene_covariates = np.hstack((runtime.gene_covariates, np.ones(runtime.gene_covariates.shape[0])[:, np.newaxis]))
+            runtime.gene_covariate_names.append("intercept")
+            runtime.gene_covariate_directions = np.append(runtime.gene_covariate_directions, 0)
+            runtime.gene_covariate_intercept_index = len(runtime.gene_covariate_names) - 1
+        else:
+            runtime.gene_covariate_intercept_index = runtime.gene_covariate_intercept_index[0]
+
+        covariate_means = np.mean(runtime.gene_covariates, axis=0)
+        covariate_sds = np.std(runtime.gene_covariates, axis=0)
+        covariate_sds[covariate_sds == 0] = 1
+
+        runtime.gene_covariates_mask = np.all(runtime.gene_covariates < covariate_means + 5 * covariate_sds, axis=1)
+        runtime.gene_covariates_mat_inv = np.linalg.inv(runtime.gene_covariates[runtime.gene_covariates_mask, :].T.dot(runtime.gene_covariates[runtime.gene_covariates_mask, :]))
+        gene_covariate_sds = np.std(runtime.gene_covariates, axis=0)
+        gene_covariate_sds[gene_covariate_sds == 0] = 1
+        runtime.gene_covariate_zs = (runtime.gene_covariates - np.mean(runtime.gene_covariates, axis=0)) / gene_covariate_sds
+
+        Y_for_regression = runtime.Y_for_regression
+        if runtime.Y_for_regression is not None:
+            (Y_for_regression, _, _) = runtime._correct_huge(
+                runtime.Y_for_regression,
+                runtime.gene_covariates,
+                runtime.gene_covariates_mask,
+                runtime.gene_covariates_mat_inv,
+                runtime.gene_covariate_names,
+                runtime.gene_covariate_intercept_index,
+            )
+
+        (Y, runtime.Y_uncorrected, _) = runtime._correct_huge(
+            runtime.Y,
+            runtime.gene_covariates,
+            runtime.gene_covariates_mask,
+            runtime.gene_covariates_mat_inv,
+            runtime.gene_covariate_names,
+            runtime.gene_covariate_intercept_index,
+        )
+
+        runtime._set_Y(Y, Y_for_regression, runtime.Y_exomes, runtime.Y_positive_controls, runtime.Y_case_counts)
+        runtime.gene_covariate_adjustments = runtime.Y_for_regression - runtime.Y_uncorrected
+
+
 def _run_read_x_stage(runtime, X_in, **read_x_kwargs):
-    # Transitional stage entrypoint: main pipeline no longer calls runtime.read_X directly.
-    return type(runtime).read_X(runtime, X_in, **read_x_kwargs)
+    return _read_x_pipeline(runtime, X_in, **read_x_kwargs)
+
+
+def _read_x_pipeline(runtime, X_in, Xd_in=None, X_list=None, Xd_list=None, V_in=None, skip_V=True, force_reread=False, min_gene_set_size=1, max_gene_set_size=30000, only_ids=None, only_inc_genes=None, fraction_inc_genes=None, add_all_genes=False, prune_gene_sets=0.8, weighted_prune_gene_sets=None, prune_deterministically=False, x_sparsify=[50,100,200,500,1000], add_ext=False, add_top=True, add_bottom=True, filter_negative=True, threshold_weights=0.5, cap_weights=True, permute_gene_sets=False, max_gene_set_p=None, filter_gene_set_p=1, filter_using_phewas=False, increase_filter_gene_set_p=0.01, max_num_gene_sets_initial=None, max_num_gene_sets=None, max_num_gene_sets_hyper=None, skip_betas=False, run_logistic=True, max_for_linear=0.95, filter_gene_set_metric_z=2.5, initial_p=0.01, xin_to_p_noninf_ind=None, initial_sigma2=1e-3, initial_sigma2_cond=None, sigma_power=0, sigma_soft_threshold_95=None, sigma_soft_threshold_5=None, run_gls=False, run_corrected_ols=False, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, update_hyper_p=False, update_hyper_sigma=False, batch_all_for_hyper=False, first_for_hyper=False, first_max_p_for_hyper=False, first_for_sigma_cond=False, sigma_num_devs_to_top=2.0, p_noninf_inflate=1, batch_separator="@", ignore_genes=set(["NA"]), file_separator=None, max_num_burn_in=None, max_num_iter_betas=1100, min_num_iter_betas=10, num_chains_betas=10, r_threshold_burn_in_betas=1.01, use_max_r_for_convergence_betas=True, max_frac_sem_betas=0.01, max_allowed_batch_correlation=None, sparse_solution=False, sparse_frac_betas=None, betas_trace_out=None, show_progress=True, max_num_entries_at_once=None):
+    if not force_reread and runtime.X_orig is not None:
+        return
+
+    if filter_using_phewas and runtime.gene_pheno_Y is None:
+        filter_using_phewas = False
+
+    runtime._set_X(None, runtime.genes, None, skip_N=True)
+    runtime._record_params({
+        "filter_gene_set_p": filter_gene_set_p,
+        "filter_negative": filter_negative,
+        "threshold_weights": threshold_weights,
+        "cap_weights": cap_weights,
+        "max_num_gene_sets_initial": max_num_gene_sets_initial,
+        "max_num_gene_sets": max_num_gene_sets,
+        "max_num_gene_sets_hyper": max_num_gene_sets_hyper,
+        "filter_gene_set_metric_z": filter_gene_set_metric_z,
+        "num_chains_betas": num_chains_betas,
+        "sigma_num_devs_to_top": sigma_num_devs_to_top,
+        "p_noninf_inflate": p_noninf_inflate,
+    })
+
+    x_input_plan = pegs_prepare_read_x_inputs(
+        X_in=X_in,
+        X_list=X_list,
+        Xd_in=Xd_in,
+        Xd_list=Xd_list,
+        initial_p=initial_p,
+        xin_to_p_noninf_ind=xin_to_p_noninf_ind,
+        batch_separator=batch_separator,
+        file_separator=file_separator,
+        sparse_list_open_fn=open_gz,
+        dense_list_open_fn=open,
+    )
+    xdata_seed = pegs_xdata_from_input_plan(x_input_plan)
+
+    read_x_config = PegsXReadConfig(
+        x_sparsify=x_sparsify,
+        min_gene_set_size=min_gene_set_size,
+        add_ext=add_ext,
+        add_top=add_top,
+        add_bottom=add_bottom,
+        threshold_weights=threshold_weights,
+        cap_weights=cap_weights,
+        permute_gene_sets=permute_gene_sets,
+        filter_gene_set_p=filter_gene_set_p,
+        filter_gene_set_metric_z=filter_gene_set_metric_z,
+        filter_using_phewas=filter_using_phewas,
+        increase_filter_gene_set_p=increase_filter_gene_set_p,
+        filter_negative=filter_negative,
+    )
+    read_x_callbacks = PegsXReadCallbacks(
+        sparse_module=sparse,
+        np_module=np,
+        normalize_dense_gene_rows_fn=_normalize_dense_gene_rows,
+        build_sparse_x_from_dense_input_fn=_build_sparse_x_from_dense_input,
+        reindex_x_rows_to_current_genes_fn=_reindex_x_rows_to_current_genes,
+        normalize_gene_set_weights_fn=_normalize_gene_set_weights,
+        partition_missing_gene_rows_fn=_partition_missing_gene_rows,
+        maybe_permute_gene_set_rows_fn=_maybe_permute_gene_set_rows,
+        maybe_prefilter_x_block_fn=_maybe_prefilter_x_block,
+        merge_missing_gene_rows_fn=_merge_missing_gene_rows,
+        finalize_added_x_block_fn=_finalize_added_x_block,
+    )
+
+    ingestion_options = pegs_build_read_x_ingestion_options(locals())
+    ingestion_state = xdata_seed.run_ingestion_stage(
+        runtime,
+        input_plan=x_input_plan,
+        read_config=read_x_config,
+        read_callbacks=read_x_callbacks,
+        ingestion_options=ingestion_options,
+        ensure_gene_universe_fn=_ensure_gene_universe_for_x,
+        process_x_input_file_fn=_process_x_input_file,
+        remove_tag_from_input_fn=_remove_tag_from_input,
+        log_fn=log,
+        info_level=INFO,
+        debug_level=DEBUG,
+    )
+
+    post_options = pegs_build_read_x_post_options(
+        locals(),
+        batches=ingestion_state["batches"],
+        num_ignored_gene_sets=ingestion_state["num_ignored_gene_sets"],
+        ignored_for_fraction_inc=ingestion_state["ignored_for_fraction_inc"],
+    )
+    post_callbacks = PegsXReadPostCallbacks(
+        standardize_qc_metrics_after_x_read_fn=_standardize_qc_metrics_after_x_read,
+        maybe_correct_gene_set_betas_after_x_read_fn=_maybe_correct_gene_set_betas_after_x_read,
+        maybe_limit_initial_gene_sets_by_p_fn=_maybe_limit_initial_gene_sets_by_p,
+        maybe_prune_gene_sets_after_x_read_fn=_maybe_prune_gene_sets_after_x_read,
+        initialize_hyper_defaults_after_x_read_fn=_initialize_hyper_defaults_after_x_read,
+        maybe_learn_batch_hyper_after_x_read_fn=_maybe_learn_batch_hyper_after_x_read,
+        maybe_adjust_overaggressive_p_filter_after_x_read_fn=_maybe_adjust_overaggressive_p_filter_after_x_read,
+        apply_post_read_gene_set_size_and_qc_filters_fn=_apply_post_read_gene_set_size_and_qc_filters,
+        maybe_filter_zero_uncorrected_betas_after_x_read_fn=_maybe_filter_zero_uncorrected_betas_after_x_read,
+        maybe_reduce_gene_sets_to_max_after_x_read_fn=_maybe_reduce_gene_sets_to_max_after_x_read,
+        record_read_x_counts_fn=pegs_record_read_x_counts,
+    )
+    xdata_seed.run_post_stage(
+        runtime,
+        post_options=post_options,
+        post_callbacks=post_callbacks,
+        log_fn=log,
+        debug_level=DEBUG,
+    )
 
 
 def _log_runtime_environment_if_requested(options):
