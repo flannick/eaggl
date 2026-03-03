@@ -50,11 +50,9 @@ try:
         load_json_config as pegs_load_json_config,
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
-        open_text_auto as pegs_open_text_auto,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
-        urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
@@ -80,11 +78,9 @@ except ImportError:
         load_json_config as pegs_load_json_config,
         load_bundle_defaults as pegs_load_bundle_defaults,
         merge_dicts as pegs_merge_dicts,
-        open_text_auto as pegs_open_text_auto,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
-        urlopen_with_retry as pegs_urlopen_with_retry,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
