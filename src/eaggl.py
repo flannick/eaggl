@@ -47,6 +47,7 @@ try:
         sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
+        initialize_matrix_and_gene_index_state as pegs_initialize_matrix_and_gene_index_state,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         harmonize_cli_mode_args as pegs_harmonize_cli_mode_args,
         initialize_cli_logging as pegs_initialize_cli_logging,
@@ -90,6 +91,7 @@ except ImportError:
         sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
         remove_tag_from_input as pegs_remove_tag_from_input,
         xdata_from_input_plan as pegs_xdata_from_input_plan,
+        initialize_matrix_and_gene_index_state as pegs_initialize_matrix_and_gene_index_state,
         apply_cli_config_overrides as pegs_apply_cli_config_overrides,
         harmonize_cli_mode_args as pegs_harmonize_cli_mode_args,
         initialize_cli_logging as pegs_initialize_cli_logging,
@@ -1051,69 +1053,7 @@ class EagglState(object):
         self.background_log_bf = np.log(self.background_prior / (1 - self.background_prior))
         self.background_bf = np.exp(self.background_log_bf)
 
-
-        #genes x gene set indicator matrix (sparse)
-        #this is always the original matrix -- it is never rescaled or shifted
-        #but, calculations of beta_tildes etc. are done relative to what would be obtained if it were scaled
-        #similarly, when X/y is whitened, the "internal state" of the code is that both X and y are whitened (and scale factors reflect this)
-        #but, for efficiency, X is maintained as a sparse matrix
-        #so, ideally this should never be accessed directly; instead get_X_orig returns the original (sparse) matrix and makes the intent explicity to avoid any scaling/whitening
-        #get_X_blocks returns the (unscaled) but whitened X
-        self.X_orig = None
-
-        #binary representation of X
-        self.X_binary_packed = None
-        #these are genes that we want to calculate priors for but which don't have gene-level statistics
-        self.X_orig_missing_genes = None
-        self.X_orig_missing_genes_missing_gene_sets = None
-        self.X_orig_missing_gene_sets = None
-        #internal cache
-        self.last_X_block = None
-
-        #genes x gene set normalized matrix
-        #REMOVING THIS for memory savings
-        #self.X = None
-
-        #this is the number of gene sets to put into a batch when fetching blocks of X
-        self.batch_size = batch_size
-
-        #flag to indicate whether these scale factors correspond to X_orig or the (implicit) whitened version
-        #if True, they can be used directly with _get_X_blocks
-        #if False but y_corr_cholesky is True, then they need to be recomputed
-        self.scale_is_for_whitened = False
-        self.scale_factors = None
-        self.mean_shifts = None
-
-        self.scale_factors_missing = None
-        self.mean_shifts_missing = None
-
-        self.scale_factors_ignored = None
-        self.mean_shifts_ignored = None
-
-        #whether this was originally a dense or sparse gene set
-        self.is_dense_gene_set = None
-        self.is_dense_gene_set_missing = None
-
-        self.gene_set_batches = None
-        self.gene_set_batches_missing = None
-
-        self.gene_set_labels = None
-        self.gene_set_labels_missing = None
-        self.gene_set_labels_ignored = None
-
-        #ordered list of genes
-        self.genes = None
-        self.genes_missing = None
-        self.gene_to_ind = None
-        self.gene_missing_to_ind = None
-
-        self.gene_chrom_name_pos = None
-        self.gene_to_chrom = None
-        self.gene_to_pos = None
-        self.gene_to_gwas_huge_score = None
-        self.gene_to_gwas_huge_score_uncorrected = None
-        self.gene_to_exomes_huge_score = None
-        self.gene_to_huge_score = None
+        pegs_initialize_matrix_and_gene_index_state(self, batch_size=batch_size)
 
         self.anchor_pheno_mask = None
         self.anchor_gene_mask = None
