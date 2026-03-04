@@ -2896,6 +2896,392 @@ class EagglState(object):
     def read_gene_phewas(self):
         return self.gene_pheno_Y is not None or  self.gene_pheno_combined_prior_Ys is not None and self.gene_pheno_priors is not None
 
+    def _build_phewas_input_values(self, run_for_factors=False, min_gene_factor_weight=0):
+        if run_for_factors:
+            input_values = self.exp_gene_factors
+            factor_keep_mask = np.full(input_values.shape[0], True)
+            if min_gene_factor_weight > 0:
+                factor_keep_mask = np.any(self.exp_gene_factors > min_gene_factor_weight, axis=1)
+            return input_values, factor_keep_mask
+
+        # Build the fixed 3-column input block (Y/combined/prior), then convert
+        # from log-odds-style values to probabilities used for PheWAS regression.
+        default_value = (
+            self.Y[:, np.newaxis]
+            if self.Y is not None
+            else self.combined_prior_Ys[:, np.newaxis]
+            if self.combined_prior_Ys is not None
+            else self.priors[:, np.newaxis]
+        )
+        input_values = np.hstack(
+            (
+                self.Y[:, np.newaxis] if self.Y is not None else default_value,
+                self.combined_prior_Ys[:, np.newaxis] if self.combined_prior_Ys is not None else default_value,
+                self.priors[:, np.newaxis] if self.priors is not None else default_value,
+            )
+        )
+        input_values = np.exp(input_values + self.background_bf) / (1 + np.exp(input_values + self.background_bf))
+        return input_values, None
+
+    def _calculate_phewas_block(
+        self,
+        X_mat,
+        Y_mat,
+        *,
+        max_num_burn_in,
+        max_num_iter,
+        min_num_iter,
+        num_chains,
+        r_threshold_burn_in,
+        use_max_r_for_convergence,
+        max_frac_sem,
+        gauss_seidel,
+        sparse_solution,
+        sparse_frac_betas,
+        non_inf_kwargs,
+        X_orig=None,
+        X_phewas_beta=None,
+        Y_resid=None,
+        multivariate=False,
+        covs=None,
+        huber=False,
+    ):
+        (mean_shifts, scale_factors) = self._calc_X_shift_scale(X_mat)
+        cor_matrices = None
+
+        beta_tildes = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
+        ses = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
+        z_scores = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
+        p_values = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
+        se_inflation_factors = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
+
+        cor_batch_size = int(np.ceil(beta_tildes.shape[0] / 4) if X_phewas_beta is not None and X_orig is not None else beta_tildes.shape[0])
+        num_cor_batches = int(np.ceil(beta_tildes.shape[0] / cor_batch_size))
+        for batch in range(num_cor_batches):
+            log("Processing block batch %s" % (batch), TRACE)
+            begin = batch * cor_batch_size
+            end = min((batch + 1) * cor_batch_size, beta_tildes.shape[0])
+
+            if X_phewas_beta is not None and X_orig is not None and not options.debug_skip_correlation:
+                if X_phewas_beta.shape[0] != Y_mat.shape[0]:
+                    bail(
+                        "When calling this, the phewas_betas must have same number of phenos as Y_mat: shapes are X_phewas=(%d,%d) vs. Y_mat=(%d,%d)"
+                        % (X_phewas_beta.shape[0], X_phewas_beta.shape[1], Y_mat.shape[0], Y_mat.shape[1])
+                    )
+                dot_threshold = 0.01 * 0.01
+                log("Calculating correlation matrix for use in residuals", DEBUG)
+                cor_matrices = self._sparse_correlation_with_dot_product_threshold(
+                    X_orig,
+                    X_phewas_beta[begin:end, :],
+                    dot_product_threshold=dot_threshold,
+                    Y=Y_resid[begin:end, :],
+                )
+
+                total = 0
+                nnz = 0
+                for cor_matrix in cor_matrices if type(cor_matrices) is list else [cor_matrices]:
+                    total += np.prod(cor_matrix.shape)
+                    nnz += cor_matrix.nnz
+                log("Sparsity of correlation matrix is %d/%d=%.3g (size %.3gMb)" % (nnz, total, float(nnz) / total, nnz * 8 / (1024 * 1024)), DEBUG)
+
+            if multivariate:
+                if huber:
+                    (beta_tildes[begin:end, :], ses[begin:end, :], z_scores[begin:end, :], p_values[begin:end, :], se_inflation_factors[begin:end, :]) = self._compute_robust_betas(
+                        X_mat,
+                        Y_mat[begin:end, :],
+                        resid_correlation_matrix=cor_matrices,
+                        covs=covs if not options.debug_skip_phewas_covs else None,
+                    )
+                else:
+                    (beta_tildes[begin:end, :], ses[begin:end, :], z_scores[begin:end, :], p_values[begin:end, :], se_inflation_factors[begin:end, :]) = self._compute_multivariate_beta_tildes(
+                        X_mat,
+                        Y_mat[begin:end, :],
+                        resid_correlation_matrix=cor_matrices,
+                        covs=covs if not options.debug_skip_phewas_covs else None,
+                    )
+            else:
+                (beta_tildes[begin:end, :], ses[begin:end, :], z_scores[begin:end, :], p_values[begin:end, :], se_inflation_factors[begin:end, :]) = self._compute_beta_tildes(
+                    X_mat,
+                    Y_mat[begin:end, :],
+                    scale_factors=scale_factors,
+                    mean_shifts=mean_shifts,
+                    resid_correlation_matrix=cor_matrices,
+                )
+
+        one_sided_p_values = copy.copy(p_values)
+        one_sided_p_values[z_scores < 0] = 1 - p_values[z_scores < 0] / 2.0
+        one_sided_p_values[z_scores > 0] = p_values[z_scores > 0] / 2.0
+
+        if multivariate:
+            return (None, None, beta_tildes.T, ses.T, z_scores.T, p_values.T, one_sided_p_values.T)
+
+        # Run non-inf regression with temporary hyperparameter overrides so this
+        # branch never leaks p/sigma state back into the broader run.
+        orig_ps = self.ps
+        orig_sigma2s = self.sigma2s
+        orig_p = self.p
+        orig_sigma2_internal = self.sigma2
+        orig_sigma_power = self.sigma_power
+        self.ps = None
+        self.sigma2s = None
+
+        try:
+            new_p = 0.5
+            new_sigma2_internal = orig_sigma2_internal * (new_p / orig_p)
+            self.set_p(new_p)
+            self.set_sigma(new_sigma2_internal, orig_sigma_power, convert_sigma_to_internal_units=False)
+
+            (betas_uncorrected, postp_uncorrected) = self._calculate_non_inf_betas(
+                initial_p=self.p,
+                assume_independent=True,
+                beta_tildes=beta_tildes,
+                ses=ses,
+                V=None,
+                X_orig=None,
+                scale_factors=scale_factors,
+                mean_shifts=mean_shifts,
+                max_num_burn_in=max_num_burn_in,
+                max_num_iter=max_num_iter,
+                min_num_iter=min_num_iter,
+                num_chains=num_chains,
+                r_threshold_burn_in=r_threshold_burn_in,
+                use_max_r_for_convergence=use_max_r_for_convergence,
+                max_frac_sem=max_frac_sem,
+                gauss_seidel=gauss_seidel,
+                update_hyper_sigma=False,
+                update_hyper_p=False,
+                sparse_solution=sparse_solution,
+                sparse_frac_betas=sparse_frac_betas,
+                **non_inf_kwargs,
+            )
+        finally:
+            self.ps = orig_ps
+            self.sigma2s = orig_sigma2s
+            self.p = orig_p
+            self.sigma2 = orig_sigma2_internal
+            self.sigma_power = orig_sigma_power
+
+        return (
+            (betas_uncorrected / scale_factors).T,
+            postp_uncorrected.T,
+            (beta_tildes / scale_factors).T,
+            (ses / scale_factors).T,
+            z_scores.T,
+            p_values.T,
+            one_sided_p_values.T,
+        )
+
+    def _append_phewas_metric_block(self, current_beta, current_beta_tilde, current_se, current_z, current_p_value, current_one_sided_p_value, beta, beta_tilde, se, z_score, p_value, one_sided_p_value):
+        if current_beta_tilde is None:
+            return beta, beta_tilde, se, z_score, p_value, one_sided_p_value
+        beta_append = np.hstack((current_beta, beta)) if current_beta is not None else None
+        one_sided_append = np.hstack((current_one_sided_p_value, one_sided_p_value)) if current_one_sided_p_value is not None else None
+        return (
+            beta_append,
+            np.hstack((current_beta_tilde, beta_tilde)),
+            np.hstack((current_se, se)),
+            np.hstack((current_z, z_score)),
+            np.hstack((current_p_value, p_value)),
+            one_sided_append,
+        )
+
+    def _resolve_phewas_file_columns(self, header_cols, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None):
+        id_col_name = gene_phewas_bfs_id_col if gene_phewas_bfs_id_col is not None else "Gene"
+        pheno_col_name = gene_phewas_bfs_pheno_col if gene_phewas_bfs_pheno_col is not None else "Pheno"
+        return {
+            "id_col": self._get_col(id_col_name, header_cols),
+            "pheno_col": self._get_col(pheno_col_name, header_cols),
+            "bf_col": self._get_col(gene_phewas_bfs_log_bf_col, header_cols) if gene_phewas_bfs_log_bf_col is not None else self._get_col("log_bf", header_cols, False),
+            "combined_col": self._get_col(gene_phewas_bfs_combined_col, header_cols, True) if gene_phewas_bfs_combined_col is not None else self._get_col("combined", header_cols, False),
+            "prior_col": self._get_col(gene_phewas_bfs_prior_col, header_cols, True) if gene_phewas_bfs_prior_col is not None else self._get_col("prior", header_cols, False),
+        }
+
+    def _expand_phewas_state_for_added_phenos(self, num_added_phenos):
+        if num_added_phenos <= 0:
+            return
+        if self.X_phewas_beta is not None:
+            self.X_phewas_beta = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta.shape[1])))))
+        if self.X_phewas_beta_uncorrected is not None:
+            self.X_phewas_beta_uncorrected = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta_uncorrected, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta_uncorrected.shape[1])))))
+        if self.gene_pheno_Y is not None:
+            self.gene_pheno_Y = sparse.csc_matrix(sparse.hstack((self.gene_pheno_Y, sparse.csc_matrix((self.gene_pheno_Y.shape[0], num_added_phenos)))))
+        if self.gene_pheno_combined_prior_Ys is not None:
+            self.gene_pheno_combined_prior_Ys = sparse.csc_matrix(sparse.hstack((self.gene_pheno_combined_prior_Ys, sparse.csc_matrix((self.gene_pheno_combined_prior_Ys.shape[0], num_added_phenos)))))
+        if self.gene_pheno_priors is not None:
+            self.gene_pheno_priors = sparse.csc_matrix(sparse.hstack((self.gene_pheno_priors, sparse.csc_matrix((self.gene_pheno_priors.shape[0], num_added_phenos)))))
+
+    def _prepare_phewas_phenos_from_file(self, gene_phewas_bfs_in, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None):
+        if self.phenos is not None:
+            phenos = copy.copy(self.phenos)
+            pheno_to_ind = copy.copy(self.pheno_to_ind)
+        else:
+            phenos = []
+            pheno_to_ind = {}
+
+        self.num_gene_phewas_filtered = 0
+        with open_gz(gene_phewas_bfs_in) as gene_phewas_bfs_fh:
+            log("Fetching phenotypes to use", DEBUG)
+            header_cols = gene_phewas_bfs_fh.readline().strip('\n').split()
+            col_info = self._resolve_phewas_file_columns(
+                header_cols=header_cols,
+                gene_phewas_bfs_id_col=gene_phewas_bfs_id_col,
+                gene_phewas_bfs_pheno_col=gene_phewas_bfs_pheno_col,
+                gene_phewas_bfs_log_bf_col=gene_phewas_bfs_log_bf_col,
+                gene_phewas_bfs_combined_col=gene_phewas_bfs_combined_col,
+                gene_phewas_bfs_prior_col=gene_phewas_bfs_prior_col,
+            )
+            id_col = col_info["id_col"]
+            pheno_col = col_info["pheno_col"]
+            bf_col = col_info["bf_col"]
+            combined_col = col_info["combined_col"]
+            prior_col = col_info["prior_col"]
+
+            for line in gene_phewas_bfs_fh:
+                cols = line.strip('\n').split()
+                if id_col >= len(cols) or pheno_col >= len(cols) or (bf_col is not None and bf_col >= len(cols)) or (combined_col is not None and combined_col >= len(cols)) or (prior_col is not None and prior_col >= len(cols)):
+                    warn("Skipping due to too few columns in line: %s" % line)
+                    continue
+
+                gene = cols[id_col]
+                if self.gene_label_map is not None and gene in self.gene_label_map:
+                    gene = self.gene_label_map[gene]
+                if gene not in self.gene_to_ind:
+                    continue
+
+                pheno = cols[pheno_col]
+                if pheno not in pheno_to_ind:
+                    pheno_to_ind[pheno] = len(phenos)
+                    phenos.append(pheno)
+
+        prior_num_phenos = len(self.phenos) if self.phenos is not None else 0
+        self._expand_phewas_state_for_added_phenos(len(phenos) - prior_num_phenos)
+        self.phenos = phenos
+        return phenos, self._construct_map_to_ind(phenos), col_info
+
+    def _read_phewas_file_batch(self, gene_phewas_bfs_in, begin, cur_batch_size, pheno_to_ind, id_col, pheno_col, bf_col, combined_col, prior_col):
+        gene_pheno_Y = np.zeros((len(self.genes), cur_batch_size)) if bf_col is not None else None
+        gene_pheno_combined_prior_Ys = np.zeros((len(self.genes), cur_batch_size)) if combined_col is not None else None
+        gene_pheno_priors = np.zeros((len(self.genes), cur_batch_size)) if prior_col is not None else None
+
+        with open_gz(gene_phewas_bfs_in) as gene_phewas_bfs_fh:
+            for line in gene_phewas_bfs_fh:
+                cols = line.strip('\n').split()
+                if id_col >= len(cols) or pheno_col >= len(cols) or (bf_col is not None and bf_col >= len(cols)) or (combined_col is not None and combined_col >= len(cols)) or (prior_col is not None and prior_col >= len(cols)):
+                    warn("Skipping due to too few columns in line: %s" % line)
+                    continue
+
+                gene = cols[id_col]
+                if self.gene_label_map is not None and gene in self.gene_label_map:
+                    gene = self.gene_label_map[gene]
+                if gene not in self.gene_to_ind:
+                    continue
+
+                pheno = cols[pheno_col]
+                if pheno not in pheno_to_ind:
+                    continue
+                pheno_ind = pheno_to_ind[pheno] - begin
+                if pheno_ind < 0 or pheno_ind >= cur_batch_size:
+                    continue
+
+                gene_ind = self.gene_to_ind[gene]
+                if combined_col is not None:
+                    try:
+                        combined = float(cols[combined_col])
+                    except ValueError:
+                        if cols[combined_col] != "NA":
+                            warn("Skipping unconvertible value %s for gene %s" % (cols[combined_col], gene))
+                        continue
+                    gene_pheno_combined_prior_Ys[gene_ind, pheno_ind] = combined
+
+                if bf_col is not None:
+                    try:
+                        bf = float(cols[bf_col])
+                    except ValueError:
+                        if cols[bf_col] != "NA":
+                            warn("Skipping unconvertible value %s for gene %s and pheno %s" % (cols[bf_col], gene, pheno))
+                        continue
+                    gene_pheno_Y[gene_ind, pheno_ind] = bf
+
+                if prior_col is not None:
+                    try:
+                        prior = float(cols[prior_col])
+                    except ValueError:
+                        if cols[prior_col] != "NA":
+                            warn("Skipping unconvertible value %s for gene %s" % (cols[prior_col], gene))
+                        continue
+                    gene_pheno_priors[gene_ind, pheno_ind] = prior
+
+        return gene_pheno_Y, gene_pheno_combined_prior_Ys, gene_pheno_priors
+
+    def _accumulate_standard_phewas_outputs(self, output_prefix, beta, beta_tilde, se, z_score, p_value):
+        input_axes = [
+            ("Y", self.Y is not None, 0),
+            ("combined_prior_Ys", self.combined_prior_Ys is not None, 1),
+            ("priors", self.priors is not None, 2),
+        ]
+        for axis_name, axis_enabled, axis_index in input_axes:
+            if not axis_enabled:
+                continue
+            output_base = "%s_vs_input_%s" % (output_prefix, axis_name)
+            (
+                updated_beta,
+                updated_beta_tilde,
+                updated_se,
+                updated_z,
+                updated_p_value,
+                _,
+            ) = self._append_phewas_metric_block(
+                getattr(self, "%s_beta" % output_base),
+                getattr(self, "%s_beta_tilde" % output_base),
+                getattr(self, "%s_se" % output_base),
+                getattr(self, "%s_Z" % output_base),
+                getattr(self, "%s_p_value" % output_base),
+                None,
+                beta[axis_index, :],
+                beta_tilde[axis_index, :],
+                se[axis_index, :],
+                z_score[axis_index, :],
+                p_value[axis_index, :],
+                None,
+            )
+            setattr(self, "%s_beta" % output_base, updated_beta)
+            setattr(self, "%s_beta_tilde" % output_base, updated_beta_tilde)
+            setattr(self, "%s_se" % output_base, updated_se)
+            setattr(self, "%s_Z" % output_base, updated_z)
+            setattr(self, "%s_p_value" % output_base, updated_p_value)
+
+    def _accumulate_factor_phewas_outputs(self, output_prefix, beta_tilde, se, z_score, p_value, one_sided_p_value, huber=False):
+        output_base = "factor_phewas_%s" % output_prefix
+        if huber:
+            output_base += "_huber"
+        (
+            updated_beta,
+            updated_beta_tilde,
+            updated_se,
+            updated_z,
+            updated_p_value,
+            updated_one_sided,
+        ) = self._append_phewas_metric_block(
+            None,
+            getattr(self, "%s_betas" % output_base),
+            getattr(self, "%s_ses" % output_base),
+            getattr(self, "%s_zs" % output_base),
+            getattr(self, "%s_p_values" % output_base),
+            getattr(self, "%s_one_sided_p_values" % output_base),
+            None,
+            beta_tilde,
+            se,
+            z_score,
+            p_value,
+            one_sided_p_value,
+        )
+        assert updated_beta is None
+        setattr(self, "%s_betas" % output_base, updated_beta_tilde)
+        setattr(self, "%s_ses" % output_base, updated_se)
+        setattr(self, "%s_zs" % output_base, updated_z)
+        setattr(self, "%s_p_values" % output_base, updated_p_value)
+        setattr(self, "%s_one_sided_p_values" % output_base, updated_one_sided)
+
     def run_phewas(self, gene_phewas_bfs_in=None, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None, run_for_factors=False, max_num_burn_in=1000, max_num_iter=1100, min_num_iter=10, num_chains=10, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, max_frac_sem=0.01, gauss_seidel=False, sparse_solution=False, sparse_frac_betas=None, batch_size=1500, min_gene_factor_weight=0, **kwargs):
 
         #require X matrix
@@ -2921,204 +3307,39 @@ class EagglState(object):
         #first get the list of phenotypes
         read_file = gene_phewas_bfs_in is not None
 
-        id_col = None
-        pheno_col = None
-        bf_col = None
-        combined_col = None
-        prior_col = None
+        col_info = None
 
         if read_file:
-            if self.phenos is not None:
-                phenos = copy.copy(self.phenos)
-                pheno_to_ind = copy.copy(self.pheno_to_ind)
-            else:
-                phenos = []
-                pheno_to_ind = {}
-
-            self.num_gene_phewas_filtered = 0
-            with open_gz(gene_phewas_bfs_in) as gene_phewas_bfs_fh:
-                log("Fetching phenotypes to use", DEBUG)
-                header_cols = gene_phewas_bfs_fh.readline().strip('\n').split()
-                if gene_phewas_bfs_id_col is None:
-                    gene_phewas_bfs_id_col = "Gene"
-                if gene_phewas_bfs_pheno_col is None:
-                    gene_phewas_bfs_pheno_col = "Pheno"
-
-                id_col = self._get_col(gene_phewas_bfs_id_col, header_cols)
-                pheno_col = self._get_col(gene_phewas_bfs_pheno_col, header_cols)
-                if gene_phewas_bfs_log_bf_col is not None:
-                    bf_col = self._get_col(gene_phewas_bfs_log_bf_col, header_cols)
-                else:
-                    bf_col = self._get_col("log_bf", header_cols, False)
-
-                if gene_phewas_bfs_combined_col is not None:
-                    combined_col = self._get_col(gene_phewas_bfs_combined_col, header_cols, True)
-                else:
-                    combined_col = self._get_col("combined", header_cols, False)
-
-                prior_col = None
-                if gene_phewas_bfs_prior_col is not None:
-                    prior_col = self._get_col(gene_phewas_bfs_prior_col, header_cols, True)
-                else:
-                    prior_col = self._get_col("prior", header_cols, False)
-
-                for line in gene_phewas_bfs_fh:
-                    cols = line.strip('\n').split()
-                    if id_col >= len(cols) or pheno_col >= len(cols) or (bf_col is not None and bf_col >= len(cols)) or (combined_col is not None and combined_col >= len(cols)) or (prior_col is not None and prior_col >= len(cols)):
-                        warn("Skipping due to too few columns in line: %s" % line)
-                        continue
-
-                    gene = cols[id_col]
-                    if self.gene_label_map is not None and gene in self.gene_label_map:
-                        gene = self.gene_label_map[gene]
-
-                    if gene not in self.gene_to_ind:
-                        continue
-
-                    pheno = cols[pheno_col]
-
-                    if pheno not in pheno_to_ind:
-                        pheno_to_ind[pheno] = len(phenos)
-                        phenos.append(pheno)
-
-                #update what's stored internally
-                num_added_phenos = 0
-                if self.phenos is not None and len(self.phenos) < len(phenos):
-                    num_added_phenos = len(phenos) - len(self.phenos)
-
-                if num_added_phenos > 0:
-                    if self.X_phewas_beta is not None:
-                        self.X_phewas_beta = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta.shape[1])))))
-                    if self.X_phewas_beta_uncorrected is not None:
-                        self.X_phewas_beta_uncorrected = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta_uncorrected, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta_uncorrected.shape[1])))))
-                    if self.gene_pheno_Y is not None:
-                        self.gene_pheno_Y = sparse.csc_matrix(sparse.hstack((self.gene_pheno_Y, sparse.csc_matrix((self.gene_pheno_Y.shape[0], num_added_phenos)))))
-                    if self.gene_pheno_combined_prior_Ys is not None:
-                        self.gene_pheno_combined_prior_Ys = sparse.csc_matrix(sparse.hstack((self.gene_pheno_combined_prior_Ys, sparse.csc_matrix((self.gene_pheno_combined_prior_Ys.shape[0], num_added_phenos)))))
-                    if self.gene_pheno_priors is not None:
-                        self.gene_pheno_priors = sparse.csc_matrix(sparse.hstack((self.gene_pheno_priors, sparse.csc_matrix((self.gene_pheno_priors.shape[0], num_added_phenos)))))
-
-                self.phenos = phenos
-                pheno_to_ind = self._construct_map_to_ind(phenos)
-
+            phenos, pheno_to_ind, col_info = self._prepare_phewas_phenos_from_file(
+                gene_phewas_bfs_in=gene_phewas_bfs_in,
+                gene_phewas_bfs_id_col=gene_phewas_bfs_id_col,
+                gene_phewas_bfs_pheno_col=gene_phewas_bfs_pheno_col,
+                gene_phewas_bfs_log_bf_col=gene_phewas_bfs_log_bf_col,
+                gene_phewas_bfs_combined_col=gene_phewas_bfs_combined_col,
+                gene_phewas_bfs_prior_col=gene_phewas_bfs_prior_col,
+            )
         else:
             phenos = self.phenos
 
         #do phewas in batches to save memory
         num_batches = int(np.ceil(len(phenos) / batch_size))
-        #always have three vectors even if some are None
-        if run_for_factors:
-            input_values = self.exp_gene_factors
-            factor_keep_mask = np.full(input_values.shape[0], True)
-
-            if min_gene_factor_weight > 0:
-                factor_keep_mask = np.any(self.exp_gene_factors > min_gene_factor_weight, axis=1)
-
-        else:
-            default_value = self.Y[:,np.newaxis] if self.Y is not None else self.combined_prior_Ys[:,np.newaxis] if self.combined_prior_Ys is not None else self.priors[:,np.newaxis]
-
-            input_values = np.hstack((self.Y[:,np.newaxis] if self.Y is not None else default_value, self.combined_prior_Ys[:,np.newaxis] if self.combined_prior_Ys is not None else default_value, self.priors[:,np.newaxis] if self.priors is not None else default_value))
-
-            #convert these to probabilities
-            input_values = np.exp(input_values + self.background_bf) / (1 + np.exp(input_values + self.background_bf))
-
-
-        def _calculate_phewas(X_mat, Y_mat, X_orig=None, X_phewas_beta=None, Y_resid=None, multivariate=False, covs=None, huber=False):
-            (mean_shifts, scale_factors) = self._calc_X_shift_scale(X_mat)
-
-            cor_matrices = None
-
-            beta_tildes = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
-            ses = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
-            z_scores = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
-            p_values = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
-            se_inflation_factors = np.zeros((Y_mat.shape[0], X_mat.shape[1]))
-
-            cor_batch_size = int(np.ceil(beta_tildes.shape[0] / 4) if X_phewas_beta is not None and X_orig is not None else beta_tildes.shape[0])
-
-            num_cor_batches = int(np.ceil(beta_tildes.shape[0] / cor_batch_size))
-            for batch in range(num_cor_batches):
-                log("Processing block batch %s" % (batch), TRACE)
-                begin = batch * cor_batch_size
-                end = (batch + 1) * cor_batch_size
-                if end > beta_tildes.shape[0]:
-                    end = beta_tildes.shape[0]
-                cur_batch_size = end - begin
-
-                if X_phewas_beta is not None and X_orig is not None and not options.debug_skip_correlation:
-                    if X_phewas_beta.shape[0] != Y_mat.shape[0]:
-                        bail("When calling this, the phewas_betas must have same number of phenos as Y_mat: shapes are X_phewas=(%d,%d) vs. Y_mat=(%d,%d)" % (X_phewas_beta.shape[0], X_phewas_beta.shape[1], Y_mat.shape[0], Y_mat.shape[1]))
-                    #require them to share at least one gene set with beta above 0.01
-                    dot_threshold = 0.01 * 0.01
-                    log("Calculating correlation matrix for use in residuals", DEBUG)
-                    cor_matrices = self._sparse_correlation_with_dot_product_threshold(X_orig, X_phewas_beta[begin:end,:], dot_product_threshold=dot_threshold, Y=Y_resid[begin:end,:])
-
-                    total = 0
-                    nnz = 0
-                    for cor_matrix in cor_matrices if type(cor_matrices) is list else [cor_matrices]:
-                        total += np.prod(cor_matrix.shape)
-                        nnz += cor_matrix.nnz
-                    log("Sparsity of correlation matrix is %d/%d=%.3g (size %.3gMb)" % (nnz, total, float(nnz)/total, nnz * 8 / (1024 * 1024)), DEBUG)
-
-                if multivariate:
-                    if huber:
-                        #(beta_tildes[begin:end,:], ses[begin:end,:], z_scores[begin:end,:], p_values[begin:end,:], se_inflation_factors[begin:end,:]) = self._compute_multivariate_beta_tildes_huber_correlated(X_mat, Y_mat[begin:end,:], resid_correlation_matrix=cor_matrices, covs=covs if not options.debug_skip_phewas_covs else None)
-
-                        (beta_tildes[begin:end,:], ses[begin:end,:], z_scores[begin:end,:], p_values[begin:end,:], se_inflation_factors[begin:end,:]) = self._compute_robust_betas(X_mat, Y_mat[begin:end,:], resid_correlation_matrix=cor_matrices, covs=covs if not options.debug_skip_phewas_covs else None)                    
-                    else:
-                        (beta_tildes[begin:end,:], ses[begin:end,:], z_scores[begin:end,:], p_values[begin:end,:], se_inflation_factors[begin:end,:]) = self._compute_multivariate_beta_tildes(X_mat, Y_mat[begin:end,:], resid_correlation_matrix=cor_matrices, covs=covs if not options.debug_skip_phewas_covs else None)
-                else:
-                    (beta_tildes[begin:end,:], ses[begin:end,:], z_scores[begin:end,:], p_values[begin:end,:], se_inflation_factors[begin:end,:]) = self._compute_beta_tildes(X_mat, Y_mat[begin:end,:], scale_factors=scale_factors, mean_shifts=mean_shifts, resid_correlation_matrix=cor_matrices)
-
-
-            one_sided_p_values = copy.copy(p_values)
-            one_sided_p_values[z_scores < 0] = 1 - p_values[z_scores < 0] / 2.0
-            one_sided_p_values[z_scores > 0] = p_values[z_scores > 0] / 2.0
-
-            if multivariate:
-                return (None, None, beta_tildes.T, ses.T, z_scores.T, p_values.T, one_sided_p_values.T)
-
-            #now run the betas (no correlations here)
-            #due to (bad) design of accessing sigma/p as member variables, we have to set and restore them surrounding the call
-            #this will use internal sigma2 and p
-            orig_ps = self.ps
-            orig_sigma2s = self.sigma2s
-            orig_p = self.p
-            orig_sigma2 = self.sigma2
-            orig_sigma_power = self.sigma_power
-            #there are always none for running betas here
-            self.ps = None
-            self.sigma2s = None
-            #self.p = 0.1
-            #self.sigma2 = 0.01
-            #self.sigma_power = orig_sigma_power
-            new_p = 0.5
-            new_sigma2 = orig_sigma2 * (new_p / orig_p)
-            self.set_p(new_p)
-            self.set_sigma(new_sigma2, orig_sigma_power, convert_sigma_to_internal_units=False)
-            update_hyper_p = False
-            update_hyper_sigma = False
-
-            (betas_uncorrected, postp_uncorrected) = self._calculate_non_inf_betas(initial_p=self.p, assume_independent=True, beta_tildes=beta_tildes, ses=ses, V=None, X_orig=None, scale_factors=scale_factors, mean_shifts=mean_shifts, max_num_burn_in=max_num_burn_in, max_num_iter=max_num_iter, min_num_iter=min_num_iter, num_chains=num_chains, r_threshold_burn_in=r_threshold_burn_in, use_max_r_for_convergence=use_max_r_for_convergence, max_frac_sem=max_frac_sem, gauss_seidel=gauss_seidel, update_hyper_sigma=update_hyper_sigma, update_hyper_p=update_hyper_p, sparse_solution=sparse_solution, sparse_frac_betas=sparse_frac_betas, **kwargs)
-
-            self.ps = orig_ps
-            self.sigma2s = orig_sigma2s
-            self.p = orig_p
-            self.sigma2 = orig_sigma2
-            self.sigma_power = orig_sigma_power
-
-            return (betas_uncorrected / scale_factors).T, postp_uncorrected.T, (beta_tildes / scale_factors).T, (ses / scale_factors).T, z_scores.T, p_values.T, one_sided_p_values.T
-
-
-        def __update_pheno_vec(self_beta, self_beta_tilde, self_se, self_Z, self_p_value, self_one_sided_p_value, beta, beta_tilde, se, Z, p_value, one_sided_p_value):
-            if self_beta_tilde is None:
-                return beta, beta_tilde, se, Z, p_value, one_sided_p_value
-            else:
-                beta_append = np.hstack((self_beta, beta)) if self_beta is not None else None
-                return beta_append, np.hstack((self_beta_tilde, beta_tilde)), np.hstack((self_se, se)), np.hstack((self_Z, Z)), np.hstack((self_p_value, p_value)), np.hstack((self_one_sided_p_value, one_sided_p_value)) if self_one_sided_p_value is not None else None
-
-
-
+        input_values, factor_keep_mask = self._build_phewas_input_values(
+            run_for_factors=run_for_factors,
+            min_gene_factor_weight=min_gene_factor_weight,
+        )
+        phewas_beta_kwargs = {
+            "max_num_burn_in": max_num_burn_in,
+            "max_num_iter": max_num_iter,
+            "min_num_iter": min_num_iter,
+            "num_chains": num_chains,
+            "r_threshold_burn_in": r_threshold_burn_in,
+            "use_max_r_for_convergence": use_max_r_for_convergence,
+            "max_frac_sem": max_frac_sem,
+            "gauss_seidel": gauss_seidel,
+            "sparse_solution": sparse_solution,
+            "sparse_frac_betas": sparse_frac_betas,
+            "non_inf_kwargs": kwargs,
+        }
 
         for batch in range(num_batches):
             log("Getting phenos block batch %s" % (batch), TRACE)
@@ -3132,65 +3353,17 @@ class EagglState(object):
             log("Processing phenos %d-%d" % (begin + 1, end))
 
             if read_file:
-                gene_pheno_Y = np.zeros((len(self.genes), cur_batch_size)) if bf_col is not None else None
-                gene_pheno_combined_prior_Ys = np.zeros((len(self.genes), cur_batch_size)) if combined_col is not None else None
-                gene_pheno_priors = np.zeros((len(self.genes), cur_batch_size)) if prior_col is not None else None
-
-                with open_gz(gene_phewas_bfs_in) as gene_phewas_bfs_fh:
-                    for line in gene_phewas_bfs_fh:
-                        cols = line.strip('\n').split()
-                        if id_col >= len(cols) or pheno_col >= len(cols) or (bf_col is not None and bf_col >= len(cols)) or (combined_col is not None and combined_col >= len(cols)) or (prior_col is not None and prior_col >= len(cols)):
-                            warn("Skipping due to too few columns in line: %s" % line)
-                            continue
-
-                        gene = cols[id_col]
-                        if self.gene_label_map is not None and gene in self.gene_label_map:
-                            gene = self.gene_label_map[gene]
-
-                        if gene not in self.gene_to_ind:
-                            continue
-
-                        gene_ind = self.gene_to_ind[gene]
-
-                        pheno = cols[pheno_col]
-
-                        if pheno not in pheno_to_ind:
-                            continue
-
-                        pheno_ind = pheno_to_ind[pheno] - begin
-                        if pheno_ind < 0 or pheno_ind >= cur_batch_size:
-                            continue
-
-
-                        if combined_col is not None:
-                            try:
-                                combined = float(cols[combined_col])
-                            except ValueError:
-                                if not cols[combined_col] == "NA":
-                                    warn("Skipping unconvertible value %s for gene %s" % (cols[combined_col], gene))
-                                continue
-
-                            gene_pheno_combined_prior_Ys[gene_ind,pheno_ind] = combined
-
-                        if bf_col is not None:
-                            try:
-                                bf = float(cols[bf_col])
-                            except ValueError:
-                                if not cols[bf_col] == "NA":
-                                    warn("Skipping unconvertible value %s for gene %s and pheno %s" % (cols[bf_col], gene, pheno))
-                                continue
-
-                            gene_pheno_Y[gene_ind,pheno_ind] = bf
-
-                        if prior_col is not None:
-                            try:
-                                prior = float(cols[prior_col])
-                            except ValueError:
-                                if not cols[prior_col] == "NA":
-                                    warn("Skipping unconvertible value %s for gene %s" % (cols[prior_col], gene))
-                                continue
-
-                            gene_pheno_prior[gene_ind,pheno_ind] = prior
+                gene_pheno_Y, gene_pheno_combined_prior_Ys, gene_pheno_priors = self._read_phewas_file_batch(
+                    gene_phewas_bfs_in=gene_phewas_bfs_in,
+                    begin=begin,
+                    cur_batch_size=cur_batch_size,
+                    pheno_to_ind=pheno_to_ind,
+                    id_col=col_info["id_col"],
+                    pheno_col=col_info["pheno_col"],
+                    bf_col=col_info["bf_col"],
+                    combined_col=col_info["combined_col"],
+                    prior_col=col_info["prior_col"],
+                )
 
             else:
                 gene_pheno_Y = self.gene_pheno_Y[:,begin:end].toarray() if self.gene_pheno_Y is not None else None
@@ -3200,52 +3373,76 @@ class EagglState(object):
             if run_for_factors:
                 #in multivariate mode the returned beta tildes are actually betas
                 if gene_pheno_Y is not None:
-                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = _calculate_phewas(input_values[factor_keep_mask,:], gene_pheno_Y[factor_keep_mask,:].T, multivariate=True, covs=self.Y[factor_keep_mask])
-
-                    _, self.factor_phewas_Y_betas, self.factor_phewas_Y_ses, self.factor_phewas_Y_zs, self.factor_phewas_Y_p_values, self.factor_phewas_Y_one_sided_p_values = __update_pheno_vec(None, self.factor_phewas_Y_betas, self.factor_phewas_Y_ses, self.factor_phewas_Y_zs, self.factor_phewas_Y_p_values, self.factor_phewas_Y_one_sided_p_values, None, beta_tilde, se, Z, p_value, one_sided_p_value)
+                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
+                        input_values[factor_keep_mask,:],
+                        gene_pheno_Y[factor_keep_mask,:].T,
+                        multivariate=True,
+                        covs=self.Y[factor_keep_mask],
+                        **phewas_beta_kwargs
+                    )
+                    self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, Z, p_value, one_sided_p_value)
 
                     if not options.debug_skip_huber:
-                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = _calculate_phewas(input_values[factor_keep_mask,:], gene_pheno_Y[factor_keep_mask,:].T, multivariate=True, covs=self.Y[factor_keep_mask], huber=True)
-
-                        _, self.factor_phewas_Y_huber_betas, self.factor_phewas_Y_huber_ses, self.factor_phewas_Y_huber_zs, self.factor_phewas_Y_huber_p_values, self.factor_phewas_Y_huber_one_sided_p_values = __update_pheno_vec(None, self.factor_phewas_Y_huber_betas, self.factor_phewas_Y_huber_ses, self.factor_phewas_Y_huber_zs, self.factor_phewas_Y_huber_p_values, self.factor_phewas_Y_huber_one_sided_p_values, None, beta_tilde, se, Z, p_value, one_sided_p_value)
+                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
+                            input_values[factor_keep_mask,:],
+                            gene_pheno_Y[factor_keep_mask,:].T,
+                            multivariate=True,
+                            covs=self.Y[factor_keep_mask],
+                            huber=True,
+                            **phewas_beta_kwargs
+                        )
+                        self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, Z, p_value, one_sided_p_value, huber=True)
 
                 if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
 
-                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = _calculate_phewas(input_values[factor_keep_mask,:], gene_pheno_combined_prior_Ys[factor_keep_mask,:].T, X_orig=self.X_orig[factor_keep_mask,:], X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None, Y_resid=gene_pheno_Y[factor_keep_mask,:].T, multivariate=True, covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask])
-
-                    _, self.factor_phewas_combined_prior_Ys_betas, self.factor_phewas_combined_prior_Ys_ses, self.factor_phewas_combined_prior_Ys_zs, self.factor_phewas_combined_prior_Ys_p_values, self.factor_phewas_combined_prior_Ys_one_sided_p_values = __update_pheno_vec(None, self.factor_phewas_combined_prior_Ys_betas, self.factor_phewas_combined_prior_Ys_ses, self.factor_phewas_combined_prior_Ys_zs, self.factor_phewas_combined_prior_Ys_p_values, self.factor_phewas_combined_prior_Ys_one_sided_p_values, None, beta_tilde, se, Z, p_value, one_sided_p_value)
+                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
+                        input_values[factor_keep_mask,:],
+                        gene_pheno_combined_prior_Ys[factor_keep_mask,:].T,
+                        X_orig=self.X_orig[factor_keep_mask,:],
+                        X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
+                        Y_resid=gene_pheno_Y[factor_keep_mask,:].T,
+                        multivariate=True,
+                        covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
+                        **phewas_beta_kwargs
+                    )
+                    self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, Z, p_value, one_sided_p_value)
 
                     if not options.debug_skip_huber:
 
-                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = _calculate_phewas(input_values[factor_keep_mask,:], gene_pheno_combined_prior_Ys[factor_keep_mask,:].T, X_orig=self.X_orig[factor_keep_mask,:], X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None, Y_resid=gene_pheno_Y[factor_keep_mask,:].T, multivariate=True, covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask], huber=True)
-
-                        _, self.factor_phewas_combined_prior_Ys_huber_betas, self.factor_phewas_combined_prior_Ys_huber_ses, self.factor_phewas_combined_prior_Ys_huber_zs, self.factor_phewas_combined_prior_Ys_huber_p_values, self.factor_phewas_combined_prior_Ys_huber_one_sided_p_values = __update_pheno_vec(None, self.factor_phewas_combined_prior_Ys_huber_betas, self.factor_phewas_combined_prior_Ys_huber_ses, self.factor_phewas_combined_prior_Ys_huber_zs, self.factor_phewas_combined_prior_Ys_huber_p_values, self.factor_phewas_combined_prior_Ys_huber_one_sided_p_values, None, beta_tilde, se, Z, p_value, one_sided_p_value)
+                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
+                            input_values[factor_keep_mask,:],
+                            gene_pheno_combined_prior_Ys[factor_keep_mask,:].T,
+                            X_orig=self.X_orig[factor_keep_mask,:],
+                            X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
+                            Y_resid=gene_pheno_Y[factor_keep_mask,:].T,
+                            multivariate=True,
+                            covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
+                            huber=True,
+                            **phewas_beta_kwargs
+                        )
+                        self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, Z, p_value, one_sided_p_value, huber=True)
             else:
                 if gene_pheno_Y is not None:
-                    beta, _, beta_tilde, se, Z, p_value, _ = _calculate_phewas(input_values, gene_pheno_Y.T)
+                    beta, _, beta_tilde, se, Z, p_value, _ = self._calculate_phewas_block(
+                        input_values,
+                        gene_pheno_Y.T,
+                        **phewas_beta_kwargs
+                    )
                     assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
-                    if self.Y is not None:
-                        self.pheno_Y_vs_input_Y_beta, self.pheno_Y_vs_input_Y_beta_tilde, self.pheno_Y_vs_input_Y_se, self.pheno_Y_vs_input_Y_Z, self.pheno_Y_vs_input_Y_p_value, _ = __update_pheno_vec(self.pheno_Y_vs_input_Y_beta, self.pheno_Y_vs_input_Y_beta_tilde, self.pheno_Y_vs_input_Y_se, self.pheno_Y_vs_input_Y_Z, self.pheno_Y_vs_input_Y_p_value, None, beta[0,:], beta_tilde[0,:], se[0,:], Z[0,:], p_value[0,:], None)
-
-                    if self.combined_prior_Ys is not None:
-                        self.pheno_Y_vs_input_combined_prior_Ys_beta, self.pheno_Y_vs_input_combined_prior_Ys_beta_tilde, self.pheno_Y_vs_input_combined_prior_Ys_se, self.pheno_Y_vs_input_combined_prior_Ys_Z, self.pheno_Y_vs_input_combined_prior_Ys_p_value, _ = __update_pheno_vec(self.pheno_Y_vs_input_combined_prior_Ys_beta, self.pheno_Y_vs_input_combined_prior_Ys_beta_tilde, self.pheno_Y_vs_input_combined_prior_Ys_se, self.pheno_Y_vs_input_combined_prior_Ys_Z, self.pheno_Y_vs_input_combined_prior_Ys_p_value, None, beta[1,:], beta_tilde[1,:], se[1,:], Z[1,:], p_value[1,:], None)
-
-                    if self.priors is not None:
-                        self.pheno_Y_vs_input_priors_beta, self.pheno_Y_vs_input_priors_beta_tilde, self.pheno_Y_vs_input_priors_se, self.pheno_Y_vs_input_priors_Z, self.pheno_Y_vs_input_priors_p_value, _ = __update_pheno_vec(self.pheno_Y_vs_input_priors_beta, self.pheno_Y_vs_input_priors_beta_tilde, self.pheno_Y_vs_input_priors_se, self.pheno_Y_vs_input_priors_Z, self.pheno_Y_vs_input_priors_p_value, None, beta[2,:], beta_tilde[2,:], se[2,:], Z[2,:], p_value[2,:], None)
+                    self._accumulate_standard_phewas_outputs("pheno_Y", beta, beta_tilde, se, Z, p_value)
 
                 if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
                     #we have to use the correlations here
-                    beta, _, beta_tilde, se, Z, p_value, _ = _calculate_phewas(input_values, gene_pheno_combined_prior_Ys.T, X_orig=self.X_orig, X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None, Y_resid=gene_pheno_Y.T)
+                    beta, _, beta_tilde, se, Z, p_value, _ = self._calculate_phewas_block(
+                        input_values,
+                        gene_pheno_combined_prior_Ys.T,
+                        X_orig=self.X_orig,
+                        X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
+                        Y_resid=gene_pheno_Y.T,
+                        **phewas_beta_kwargs
+                    )
                     assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
-                    if self.Y is not None:
-                        self.pheno_combined_prior_Ys_vs_input_Y_beta, self.pheno_combined_prior_Ys_vs_input_Y_beta_tilde, self.pheno_combined_prior_Ys_vs_input_Y_se, self.pheno_combined_prior_Ys_vs_input_Y_Z, self.pheno_combined_prior_Ys_vs_input_Y_p_value, _ = __update_pheno_vec(self.pheno_combined_prior_Ys_vs_input_Y_beta, self.pheno_combined_prior_Ys_vs_input_Y_beta_tilde, self.pheno_combined_prior_Ys_vs_input_Y_se, self.pheno_combined_prior_Ys_vs_input_Y_Z, self.pheno_combined_prior_Ys_vs_input_Y_p_value, None, beta[0,:], beta_tilde[0,:], se[0,:], Z[0,:], p_value[0,:], None)
-
-                    if self.combined_prior_Ys is not None:
-                        self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_beta, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_beta_tilde, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_se, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_Z, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_p_value, _ = __update_pheno_vec(self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_beta, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_beta_tilde, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_se, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_Z, self.pheno_combined_prior_Ys_vs_input_combined_prior_Ys_p_value, None, beta[1,:], beta_tilde[1,:], se[1,:], Z[1,:], p_value[1,:], None)
-
-
-                    if self.priors is not None:
-                        self.pheno_combined_prior_Ys_vs_input_priors_beta, self.pheno_combined_prior_Ys_vs_input_priors_beta_tilde, self.pheno_combined_prior_Ys_vs_input_priors_se, self.pheno_combined_prior_Ys_vs_input_priors_Z, self.pheno_combined_prior_Ys_vs_input_priors_p_value, _ = __update_pheno_vec(self.pheno_combined_prior_Ys_vs_input_priors_beta, self.pheno_combined_prior_Ys_vs_input_priors_beta_tilde, self.pheno_combined_prior_Ys_vs_input_priors_se, self.pheno_combined_prior_Ys_vs_input_priors_Z, self.pheno_combined_prior_Ys_vs_input_priors_p_value, None, beta[2,:], beta_tilde[2,:], se[2,:], Z[2,:], p_value[2,:], None)
+                    self._accumulate_standard_phewas_outputs("pheno_combined_prior_Ys", beta, beta_tilde, se, Z, p_value)
 
     def get_col_sums(self, X, num_nonzero=False, axis=0):
         if num_nonzero:
