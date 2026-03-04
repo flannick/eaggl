@@ -85,7 +85,7 @@ try:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_defaults as pegs_load_bundle_defaults,
+        load_bundle_defaults_contract as pegs_load_bundle_defaults_contract,
         merge_dicts as pegs_merge_dicts,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
@@ -149,7 +149,7 @@ except ImportError:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_defaults as pegs_load_bundle_defaults,
+        load_bundle_defaults_contract as pegs_load_bundle_defaults_contract,
         merge_dicts as pegs_merge_dicts,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
@@ -748,7 +748,7 @@ def _classify_factor_workflow(_options):
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
 def _load_eaggl_bundle_inputs(bundle_path):
-    extract_dir, manifest, resolved_default_inputs = pegs_load_bundle_defaults(
+    bundle = pegs_load_bundle_defaults_contract(
         bundle_path,
         PEGS_EAGGL_BUNDLE_SCHEMA,
         PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
@@ -757,14 +757,14 @@ def _load_eaggl_bundle_inputs(bundle_path):
         temp_prefix="eaggl_bundle_in_",
         bail_fn=bail,
     )
-    _EAGGL_BUNDLE_TEMP_DIRS.append(extract_dir)
+    _EAGGL_BUNDLE_TEMP_DIRS.append(bundle.extract_dir)
 
     return {
         "bundle_path": bundle_path,
-        "extract_dir": extract_dir,
+        "extract_dir": bundle.extract_dir,
         "schema": PEGS_EAGGL_BUNDLE_SCHEMA,
-        "manifest": manifest,
-        "default_inputs": resolved_default_inputs,
+        "manifest": bundle.manifest,
+        "default_inputs": bundle.default_inputs,
     }
 
 
