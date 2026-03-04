@@ -1449,22 +1449,6 @@ class EagglState(object):
         self.hyperparameter_state = pegs_sync_hyperparameter_state(self)
         self.phewas_state = pegs_sync_phewas_runtime_state(self)
 
-    def init_gene_locs(self, gene_loc_file):
-        log("Reading --gene-loc-file %s" % gene_loc_file)
-        (self.gene_chrom_name_pos, self.gene_to_chrom, self.gene_to_pos) = self._read_loc_file(gene_loc_file)
-
-    def read_gene_map(self, gene_map_in, gene_map_orig_gene_col=1, gene_map_new_gene_col=2, allow_multi=False):
-        self.gene_label_map = self._read_gene_map(gene_map_in, gene_map_orig_gene_col, gene_map_new_gene_col, allow_multi)         
-
-    def _read_gene_map(self, gene_map_in, gene_map_orig_gene_col=1, gene_map_new_gene_col=2, allow_multi=False):
-        return pegs_parse_gene_map_file(
-            gene_map_in,
-            gene_map_orig_gene_col=gene_map_orig_gene_col,
-            gene_map_new_gene_col=gene_map_new_gene_col,
-            allow_multi=allow_multi,
-            bail_fn=bail,
-        )
-
     #this reads a V matrix directly from a file
     #it does not initialize an X matrix; if the X-matrix is needed, read_X should be used instead
     def calculate_huge_scores_gwas(self, gwas_in, gwas_chrom_col=None, gwas_pos_col=None, gwas_p_col=None, gene_loc_file=None, hold_out_chrom=None, exons_loc_file=None, gwas_beta_col=None, gwas_se_col=None, gwas_n_col=None, gwas_n=None, gwas_freq_col=None, gwas_filter_col=None, gwas_filter_value=None, gwas_locus_col=None, gwas_ignore_p_threshold=None, gwas_units=None, gwas_low_p=5e-8, gwas_high_p=1e-2, gwas_low_p_posterior=0.98, gwas_high_p_posterior=0.001, detect_low_power=None, detect_high_power=None, detect_adjust_huge=False, learn_window=False, closest_gene_prob=0.7, max_closest_gene_prob=0.9, scale_raw_closest_gene=True, cap_raw_closest_gene=False, cap_region_posterior=True, scale_region_posterior=False, phantom_region_posterior=False, allow_evidence_of_absence=False, correct_huge=True, max_signal_p=1e-5, signal_window_size=250000, signal_min_sep=100000, signal_max_logp_ratio=None, credible_set_span=25000, max_closest_gene_dist=2.5e5, min_n_ratio=0.5, max_clump_ld=0.2, min_var_posterior=0.01, s2g_in=None, s2g_chrom_col=None, s2g_pos_col=None, s2g_gene_col=None, s2g_prob_col=None, s2g_normalize_values=None, credible_sets_in=None, credible_sets_id_col=None, credible_sets_chrom_col=None, credible_sets_pos_col=None, credible_sets_ppa_col=None, **kwargs):
@@ -1581,7 +1565,11 @@ class EagglState(object):
 
         phewas_gene_to_X_gene = None
         if phewas_gene_to_X_gene_in is not None:
-            phewas_gene_to_X_gene = self._read_gene_map(phewas_gene_to_X_gene_in, allow_multi=True)
+            phewas_gene_to_X_gene = pegs_parse_gene_map_file(
+                phewas_gene_to_X_gene_in,
+                allow_multi=True,
+                bail_fn=bail,
+            )
 
         pegs_load_and_apply_gene_phewas_bfs_to_runtime(
             self,
@@ -9068,11 +9056,41 @@ def _log_runtime_environment_if_requested(options):
     log("Options: %s" % options)
 
 
+def _read_gene_map(runtime_state, gene_map_in, gene_map_orig_gene_col=1, gene_map_new_gene_col=2, allow_multi=False):
+    runtime_state.gene_label_map = pegs_parse_gene_map_file(
+        gene_map_in,
+        gene_map_orig_gene_col=gene_map_orig_gene_col,
+        gene_map_new_gene_col=gene_map_new_gene_col,
+        allow_multi=allow_multi,
+        bail_fn=bail,
+    )
+
+
+def _init_gene_locs(runtime_state, gene_loc_file):
+    log("Reading --gene-loc-file %s" % gene_loc_file)
+    (
+        runtime_state.gene_chrom_name_pos,
+        runtime_state.gene_to_chrom,
+        runtime_state.gene_to_pos,
+    ) = pegs_read_loc_file_with_gene_map(
+        gene_loc_file,
+        gene_label_map=runtime_state.gene_label_map,
+        clean_chrom_fn=pegs_clean_chrom_name,
+        warn_fn=warn,
+        bail_fn=bail,
+    )
+
+
 def _initialize_main_mappings(g, options):
     if options.gene_map_in:
-        g.read_gene_map(options.gene_map_in, options.gene_map_orig_gene_col, options.gene_map_orig_gene_col)
+        _read_gene_map(
+            g,
+            options.gene_map_in,
+            options.gene_map_orig_gene_col,
+            options.gene_map_new_gene_col,
+        )
     if options.gene_loc_file:
-        g.init_gene_locs(options.gene_loc_file)
+        _init_gene_locs(g, options.gene_loc_file)
 
 
 def _derive_factor_anchor_masks(g, options):
