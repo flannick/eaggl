@@ -5110,18 +5110,6 @@ class EagglState(object):
 
         return (huge_results, huge_results_uncorrected, gene_covariate_betas)
 
-
-    def _read_loc_file(self, loc_file, return_intervals=False, hold_out_chrom=None):
-        return pegs_read_loc_file_with_gene_map(
-            loc_file,
-            gene_label_map=self.gene_label_map,
-            return_intervals=return_intervals,
-            hold_out_chrom=hold_out_chrom,
-            clean_chrom_fn=pegs_clean_chrom_name,
-            warn_fn=warn,
-            bail_fn=bail,
-        )
-
     def _read_correlations(self, gene_cor_file=None, gene_loc_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, compute_correlation_distance_function=True):
         if self.y_corr_cholesky is not None:
             bail("Cannot read/sort correlations after initializing full GLS correlation state (y_corr_cholesky). Re-run correlation setup before enabling full GLS, or disable full GLS for this step.")
@@ -8757,7 +8745,17 @@ def _read_y_pipeline(runtime, gwas_in=None, huge_statistics_in=None, huge_statis
         if runtime.gene_to_chrom is None:
             if gene_loc_file is None:
                 bail("Option --hold-out-chrom requires --gene-loc-file")
-            (runtime.gene_chrom_name_pos, runtime.gene_to_chrom, runtime.gene_to_pos) = runtime._read_loc_file(gene_loc_file)
+            (
+                runtime.gene_chrom_name_pos,
+                runtime.gene_to_chrom,
+                runtime.gene_to_pos,
+            ) = pegs_read_loc_file_with_gene_map(
+                gene_loc_file,
+                gene_label_map=runtime.gene_label_map,
+                clean_chrom_fn=pegs_clean_chrom_name,
+                warn_fn=warn,
+                bail_fn=bail,
+            )
 
         Y_values = np.array(Y_values, dtype=float)
         extra_gene_names = list(extra_gene_names)
