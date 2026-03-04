@@ -85,11 +85,11 @@ try:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_defaults_contract as pegs_load_bundle_defaults_contract,
         merge_dicts as pegs_merge_dicts,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        BundleManifest as PegsBundleManifest,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
@@ -149,11 +149,11 @@ except ImportError:
         is_remote_path as pegs_is_remote_path,
         json_safe as pegs_json_safe,
         load_json_config as pegs_load_json_config,
-        load_bundle_defaults_contract as pegs_load_bundle_defaults_contract,
         merge_dicts as pegs_merge_dicts,
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        BundleManifest as PegsBundleManifest,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
@@ -748,10 +748,10 @@ def _classify_factor_workflow(_options):
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
 def _load_eaggl_bundle_inputs(bundle_path):
-    bundle = pegs_load_bundle_defaults_contract(
-        bundle_path,
-        PEGS_EAGGL_BUNDLE_SCHEMA,
-        PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+    bundle = PegsBundleManifest.load_defaults(
+        bundle_path=bundle_path,
+        expected_schema=PEGS_EAGGL_BUNDLE_SCHEMA,
+        allowed_default_inputs=PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         bundle_flag_name="--eaggl-bundle-in",
         manifest_name="manifest.json",
         temp_prefix="eaggl_bundle_in_",
