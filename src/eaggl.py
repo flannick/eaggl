@@ -31,7 +31,6 @@ try:
     from .pegs_utils import (
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
-        assign_default_batches as pegs_assign_default_batches,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
         initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
         maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
@@ -97,7 +96,6 @@ except ImportError:
     from pegs_utils import (
         callback_set_comma_separated_args as pegs_callback_set_comma_separated_args,
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
-        assign_default_batches as pegs_assign_default_batches,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
         initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
         maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
@@ -1552,7 +1550,7 @@ class EagglState(object):
             max_num_entries_at_once=max_num_entries_at_once,
             open_text_fn=open_gz,
             get_col_fn=self._get_col,
-            construct_map_to_ind_fn=self._construct_map_to_ind,
+            construct_map_to_ind_fn=pegs_construct_map_to_ind,
             warn_fn=warn,
             bail_fn=bail,
             log_fn=lambda message: log(message, DEBUG),
@@ -1600,7 +1598,7 @@ class EagglState(object):
             max_num_entries_at_once=max_num_entries_at_once,
             open_text_fn=open_gz,
             get_col_fn=self._get_col,
-            construct_map_to_ind_fn=self._construct_map_to_ind,
+            construct_map_to_ind_fn=pegs_construct_map_to_ind,
             warn_fn=warn,
             bail_fn=bail,
             log_fn=lambda message: log(message, DEBUG),
@@ -3107,7 +3105,7 @@ class EagglState(object):
         prior_num_phenos = len(self.phenos) if self.phenos is not None else 0
         self._expand_phewas_state_for_added_phenos(len(phenos) - prior_num_phenos)
         self.phenos = phenos
-        return phenos, self._construct_map_to_ind(phenos), col_info
+        return phenos, pegs_construct_map_to_ind(phenos), col_info
 
     def _read_phewas_file_batch(self, gene_phewas_bfs_in, begin, cur_batch_size, pheno_to_ind, id_col, pheno_col, bf_col, combined_col, prior_col):
         gene_pheno_Y = np.zeros((len(self.genes), cur_batch_size)) if bf_col is not None else None
@@ -5131,14 +5129,10 @@ class EagglState(object):
             gene_label_map=self.gene_label_map,
             return_intervals=return_intervals,
             hold_out_chrom=hold_out_chrom,
-            clean_chrom_fn=self._clean_chrom,
+            clean_chrom_fn=pegs_clean_chrom_name,
             warn_fn=warn,
             bail_fn=bail,
         )
-
-
-    def _clean_chrom(self, chrom):
-        return pegs_clean_chrom_name(chrom)
 
     def _read_correlations(self, gene_cor_file=None, gene_loc_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, compute_correlation_distance_function=True):
         if self.y_corr_cholesky is not None:
@@ -6770,9 +6764,9 @@ class EagglState(object):
                         res_beta_hat_union_t = curr_betas_t[:,compute_mask_v,:].dot(V[:,compute_mask_union])
 
                     if betas_trace_out is not None and betas_trace_gene_sets is not None:
-                        all_map = self._construct_map_to_ind(betas_trace_gene_sets)
+                        all_map = pegs_construct_map_to_ind(betas_trace_gene_sets)
                         cur_sets = [betas_trace_gene_sets[x] for x in range(len(betas_trace_gene_sets)) if compute_mask_union[x]]
-                        cur_map = self._construct_map_to_ind(cur_sets)
+                        cur_map = pegs_construct_map_to_ind(cur_sets)
 
                     #4. Now restrict to only the actual masks (which flattens things because the compute_mask_m is not square)
 
@@ -7550,13 +7544,13 @@ class EagglState(object):
                 self._reread_gene_phewas_bfs()
 
         if self.genes is not None:
-            self.gene_to_ind = self._construct_map_to_ind(self.genes)
+            self.gene_to_ind = pegs_construct_map_to_ind(self.genes)
         else:
             self.gene_to_ind = None
 
         self.gene_sets = gene_sets
         if self.gene_sets is not None:
-            self.gene_set_to_ind = self._construct_map_to_ind(self.gene_sets)
+            self.gene_set_to_ind = pegs_construct_map_to_ind(self.gene_sets)
         else:
             self.gene_set_to_ind = None
 
@@ -7900,7 +7894,7 @@ class EagglState(object):
             bail("Sorting genes after setting correlation matrix is not yet implemented")
 
         self.genes = [self.genes[i] for i in sorted_gene_indices]
-        self.gene_to_ind = self._construct_map_to_ind(self.genes)
+        self.gene_to_ind = pegs_construct_map_to_ind(self.genes)
 
         index_map = {sorted_gene_indices[i]: i for i in range(len(sorted_gene_indices))}
 
@@ -8138,10 +8132,10 @@ class EagglState(object):
 
         self.genes_missing = (self.genes_missing if self.genes_missing is not None else []) + [self.genes[i] for i in range(len(self.genes)) if not gene_mask[i]]
 
-        self.gene_missing_to_ind = self._construct_map_to_ind(self.genes_missing)
+        self.gene_missing_to_ind = pegs_construct_map_to_ind(self.genes_missing)
         
         self.genes = [self.genes[i] for i in range(len(self.genes)) if gene_mask[i]]
-        self.gene_to_ind = self._construct_map_to_ind(self.genes)
+        self.gene_to_ind = pegs_construct_map_to_ind(self.genes)
 
         remove_mask = np.logical_not(gene_mask)
 
@@ -8505,7 +8499,7 @@ class EagglState(object):
             self.sigma2s = self.sigma2s[subset_mask]
 
         self.gene_sets = list(itertools.compress(self.gene_sets, subset_mask))
-        self.gene_set_to_ind = self._construct_map_to_ind(self.gene_sets)
+        self.gene_set_to_ind = pegs_construct_map_to_ind(self.gene_sets)
 
         if self.X_phewas_beta is not None:
             self.X_phewas_beta = self.X_phewas_beta[:,subset_mask]                
@@ -8528,9 +8522,6 @@ class EagglState(object):
             self.set_sigma(self.sigma2, self.sigma_power, sigma2_osc=self.sigma2_osc)
         if self.p is not None:
             self.set_p(self.p)
-
-    def _construct_map_to_ind(self, gene_sets):
-        return pegs_construct_map_to_ind(gene_sets)
 
     #utility function to map names or indices to column indicies
     def _get_col(self, col_name_or_index, header_cols, require_match=True):
@@ -9034,7 +9025,7 @@ def _read_x_pipeline(runtime, X_in, Xd_in=None, X_list=None, Xd_list=None, V_in=
         ingestion_options=ingestion_options,
         ensure_gene_universe_fn=_ensure_gene_universe_for_x,
         process_x_input_file_fn=_process_x_input_file,
-        remove_tag_from_input_fn=_remove_tag_from_input,
+        remove_tag_from_input_fn=pegs_remove_tag_from_input,
         log_fn=log,
         info_level=INFO,
         debug_level=DEBUG,
@@ -9223,10 +9214,6 @@ def _run_main_factor_phewas_stage(g, options):
 
 def _should_run_main_factor_phewas_stage(mode_state):
     return bool(mode_state["run_factor"] and mode_state["run_factor_phewas"])
-
-
-def _remove_tag_from_input(x_in, tag_separator=':'):
-    return pegs_remove_tag_from_input(x_in, tag_separator=tag_separator)
 
 
 def _normalize_dense_gene_rows(mat_info, genes, gene_label_map):
