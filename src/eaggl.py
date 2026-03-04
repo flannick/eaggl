@@ -58,6 +58,9 @@ try:
         sync_y_state as pegs_sync_y_state,
         sync_hyperparameter_state as pegs_sync_hyperparameter_state,
         sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
+        derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
+        resolve_gene_phewas_input_for_stage as pegs_resolve_gene_phewas_input_for_stage,
+        build_phewas_stage_config as pegs_build_phewas_stage_config,
         remove_tag_from_input as pegs_remove_tag_from_input,
         XReadConfig as PegsXReadConfig,
         XReadCallbacks as PegsXReadCallbacks,
@@ -119,6 +122,9 @@ except ImportError:
         sync_y_state as pegs_sync_y_state,
         sync_hyperparameter_state as pegs_sync_hyperparameter_state,
         sync_phewas_runtime_state as pegs_sync_phewas_runtime_state,
+        derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
+        resolve_gene_phewas_input_for_stage as pegs_resolve_gene_phewas_input_for_stage,
+        build_phewas_stage_config as pegs_build_phewas_stage_config,
         remove_tag_from_input as pegs_remove_tag_from_input,
         XReadConfig as PegsXReadConfig,
         XReadCallbacks as PegsXReadCallbacks,
@@ -8972,34 +8978,27 @@ def _initialize_main_mappings(g, options):
 
 
 def _derive_factor_anchor_masks(g, options):
-    anchor_gene_mask = None
-    anchor_pheno_mask = None
-
-    if options.anchor_genes is not None:
-        anchor_gene_mask = np.array([x in options.anchor_genes for x in g.genes])
-        if np.sum(anchor_gene_mask) == 0:
-            bail("None of the anchor genes are in X")
-
-    if options.anchor_phenos is not None:
-        anchor_pheno_mask = np.array([x in options.anchor_phenos for x in g.phenos])
-        if np.sum(anchor_pheno_mask) == 0:
-            bail("None of the anchor phenos are in gene pheno matrix")
-
-    return {
-        "anchor_gene_mask": anchor_gene_mask,
-        "anchor_pheno_mask": anchor_pheno_mask,
-    }
+    return pegs_derive_factor_anchor_masks(
+        genes=g.genes,
+        phenos=g.phenos,
+        anchor_genes=options.anchor_genes,
+        anchor_phenos=options.anchor_phenos,
+        bail_fn=bail,
+    )
 
 
 def _load_factor_phewas_inputs(g, options):
     # Factor/projection workflows consume these as matrix inputs; this is distinct
     # from standalone PheWAS execution which is handled in a separate stage.
+    factor_input_data = _derive_factor_anchor_masks(g, options)
     if options.gene_set_phewas_stats_in is not None:
         g.read_gene_set_phewas_statistics(options.gene_set_phewas_stats_in, stats_id_col=options.gene_set_phewas_stats_id_col, stats_pheno_col=options.gene_set_phewas_stats_pheno_col, stats_beta_col=options.gene_set_phewas_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, max_num_entries_at_once=options.max_read_entries_at_once)
+        factor_input_data.loaded_gene_set_phewas_stats = True
 
     if options.gene_phewas_bfs_in:
         g.read_gene_phewas_bfs(gene_phewas_bfs_in=options.gene_phewas_bfs_in,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, anchor_genes=options.anchor_genes, anchor_phenos=options.anchor_phenos, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, phewas_gene_to_X_gene_in=options.gene_phewas_id_to_X_id, min_value=options.min_gene_phewas_read_value, max_num_entries_at_once=options.max_read_entries_at_once)
-    return _derive_factor_anchor_masks(g, options)
+        factor_input_data.loaded_gene_phewas_bfs = True
+    return factor_input_data
 
 
 def _write_main_primary_outputs(g, options):
@@ -9020,41 +9019,37 @@ def _write_main_primary_outputs(g, options):
 
 
 def _resolve_gene_phewas_input_for_stage(g, requested_input, reusable_inputs):
-    if requested_input is None:
-        return None
-    if not g.read_gene_phewas():
-        return requested_input
-    if g.num_gene_phewas_filtered != 0:
-        return requested_input
-    for candidate in reusable_inputs:
-        if candidate is not None and requested_input == candidate:
-            return None
-    return requested_input
+    return pegs_resolve_gene_phewas_input_for_stage(
+        requested_input=requested_input,
+        reusable_inputs=reusable_inputs,
+        read_gene_phewas=g.read_gene_phewas(),
+        num_gene_phewas_filtered=g.num_gene_phewas_filtered,
+    )
 
 
 def _run_phewas_with_common_args(g, options, gene_phewas_bfs_in, run_for_factors=False, min_gene_factor_weight=0):
-    run_kwargs = {
-        "gene_phewas_bfs_in": gene_phewas_bfs_in,
-        "gene_phewas_bfs_id_col": options.gene_phewas_bfs_id_col,
-        "gene_phewas_bfs_pheno_col": options.gene_phewas_bfs_pheno_col,
-        "gene_phewas_bfs_log_bf_col": options.gene_phewas_bfs_log_bf_col,
-        "gene_phewas_bfs_combined_col": options.gene_phewas_bfs_combined_col,
-        "gene_phewas_bfs_prior_col": options.gene_phewas_bfs_prior_col,
-        "max_num_burn_in": options.max_num_burn_in,
-        "max_num_iter": options.max_num_iter_betas,
-        "min_num_iter": options.min_num_iter_betas,
-        "num_chains": options.num_chains_betas,
-        "r_threshold_burn_in": options.r_threshold_burn_in_betas,
-        "use_max_r_for_convergence": options.use_max_r_for_convergence_betas,
-        "max_frac_sem": options.max_frac_sem_betas,
-        "gauss_seidel": options.gauss_seidel_betas,
-        "sparse_solution": options.sparse_solution,
-        "sparse_frac_betas": options.sparse_frac_betas,
-    }
-    if run_for_factors:
-        run_kwargs["run_for_factors"] = True
-        run_kwargs["batch_size"] = 300
-        run_kwargs["min_gene_factor_weight"] = min_gene_factor_weight
+    phewas_config = pegs_build_phewas_stage_config(
+        gene_phewas_bfs_in=gene_phewas_bfs_in,
+        gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col,
+        gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col,
+        gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col,
+        gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col,
+        gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col,
+        max_num_burn_in=options.max_num_burn_in,
+        max_num_iter=options.max_num_iter_betas,
+        min_num_iter=options.min_num_iter_betas,
+        num_chains=options.num_chains_betas,
+        r_threshold_burn_in=options.r_threshold_burn_in_betas,
+        use_max_r_for_convergence=options.use_max_r_for_convergence_betas,
+        max_frac_sem=options.max_frac_sem_betas,
+        gauss_seidel=options.gauss_seidel_betas,
+        sparse_solution=options.sparse_solution,
+        sparse_frac_betas=options.sparse_frac_betas,
+        run_for_factors=run_for_factors,
+        batch_size=300 if run_for_factors else None,
+        min_gene_factor_weight=min_gene_factor_weight,
+    )
+    run_kwargs = phewas_config.to_run_kwargs()
     g.run_phewas(**run_kwargs)
 
 
@@ -9078,7 +9073,7 @@ def _run_main_factor_stage(g, options, mode_state, factor_input_state):
     else:
         gene_or_pheno_filter_value = options.gene_filter_value
 
-    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state["anchor_pheno_mask"], anchor_gene_mask=factor_input_state["anchor_gene_mask"], anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, lmm_provider=options.lmm_provider, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state.anchor_pheno_mask, anchor_gene_mask=factor_input_state.anchor_gene_mask, anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, lmm_provider=options.lmm_provider, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
     workflow = mode_state.get("factor_workflow") if isinstance(mode_state, dict) else None
     workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
     return FactorStageResult(ran=True, workflow_id=workflow_id)
