@@ -1493,54 +1493,6 @@ class EagglState(object):
     def combine_huge_scores(self):
         bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
 
-    def read_gene_set_statistics(self, stats_in, stats_id_col=None, stats_exp_beta_tilde_col=None, stats_beta_tilde_col=None, stats_p_col=None, stats_se_col=None, stats_beta_col=None, stats_beta_uncorrected_col=None, ignore_negative_exp_beta=False, max_gene_set_p=None, min_gene_set_beta=None, min_gene_set_beta_uncorrected=None, return_only_ids=False):
-        return pegs_load_and_apply_gene_set_statistics_to_runtime(
-            self,
-            stats_in,
-            stats_id_col=stats_id_col,
-            stats_exp_beta_tilde_col=stats_exp_beta_tilde_col,
-            stats_beta_tilde_col=stats_beta_tilde_col,
-            stats_p_col=stats_p_col,
-            stats_se_col=stats_se_col,
-            stats_beta_col=stats_beta_col,
-            stats_beta_uncorrected_col=stats_beta_uncorrected_col,
-            ignore_negative_exp_beta=ignore_negative_exp_beta,
-            max_gene_set_p=max_gene_set_p,
-            min_gene_set_beta=min_gene_set_beta,
-            min_gene_set_beta_uncorrected=min_gene_set_beta_uncorrected,
-            return_only_ids=return_only_ids,
-            open_text_fn=open_gz,
-            get_col_fn=self._get_col,
-            parse_log_fn=lambda message: log(message, INFO),
-            apply_log_fn=lambda message: log(message, DEBUG),
-            warn_fn=warn,
-            bail_fn=bail,
-        )
-
-
-    def read_gene_set_phewas_statistics(self, stats_in, stats_id_col=None, stats_pheno_col=None, stats_beta_col=None, stats_beta_uncorrected_col=None, min_gene_set_beta=None, min_gene_set_beta_uncorrected=None, update_X=False, phenos_to_match=None, return_only_ids=False, max_num_entries_at_once=None):
-        return pegs_load_and_apply_gene_set_phewas_statistics_to_runtime(
-            self,
-            stats_in,
-            stats_id_col=stats_id_col,
-            stats_pheno_col=stats_pheno_col,
-            stats_beta_col=stats_beta_col,
-            stats_beta_uncorrected_col=stats_beta_uncorrected_col,
-            min_gene_set_beta=min_gene_set_beta,
-            min_gene_set_beta_uncorrected=min_gene_set_beta_uncorrected,
-            update_X=update_X,
-            phenos_to_match=phenos_to_match,
-            return_only_ids=return_only_ids,
-            max_num_entries_at_once=max_num_entries_at_once,
-            open_text_fn=open_gz,
-            get_col_fn=self._get_col,
-            construct_map_to_ind_fn=pegs_construct_map_to_ind,
-            warn_fn=warn,
-            bail_fn=bail,
-            log_fn=lambda message: log(message, DEBUG),
-        )
-
-
     def _reread_gene_phewas_bfs(self):
         if self.cached_gene_phewas_call is not None:
             log("Rereading gene phewas bfs...")
@@ -8591,7 +8543,8 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
     if factor_uses_phewas_gene_set_ids:
         if options.gene_set_phewas_stats_in is None:
             bail("Need --gene-set-phewas-stats-in")
-        gene_set_ids = g.read_gene_set_phewas_statistics(
+        gene_set_ids = _read_gene_set_phewas_statistics(
+            g,
             options.gene_set_phewas_stats_in,
             stats_id_col=options.gene_set_phewas_stats_id_col,
             stats_pheno_col=options.gene_set_phewas_stats_pheno_col,
@@ -8604,7 +8557,8 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
             max_num_entries_at_once=options.max_read_entries_at_once,
         )
     elif options.gene_set_stats_in is not None:
-        gene_set_ids = g.read_gene_set_statistics(
+        gene_set_ids = _read_gene_set_statistics(
+            g,
             options.gene_set_stats_in,
             stats_id_col=options.gene_set_stats_id_col,
             stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col,
@@ -8680,7 +8634,8 @@ def _run_main_factor_only_pipeline(g, options, mode_state):
         )
 
     if options.gene_set_stats_in is not None:
-        g.read_gene_set_statistics(
+        _read_gene_set_statistics(
+            g,
             options.gene_set_stats_in,
             stats_id_col=options.gene_set_stats_id_col,
             stats_exp_beta_tilde_col=options.gene_set_stats_exp_beta_tilde_col,
@@ -9091,6 +9046,84 @@ def _initialize_main_mappings(g, options):
         _init_gene_locs(g, options.gene_loc_file)
 
 
+def _read_gene_set_statistics(
+    runtime_state,
+    stats_in,
+    *,
+    stats_id_col=None,
+    stats_exp_beta_tilde_col=None,
+    stats_beta_tilde_col=None,
+    stats_p_col=None,
+    stats_se_col=None,
+    stats_beta_col=None,
+    stats_beta_uncorrected_col=None,
+    ignore_negative_exp_beta=False,
+    max_gene_set_p=None,
+    min_gene_set_beta=None,
+    min_gene_set_beta_uncorrected=None,
+    return_only_ids=False,
+):
+    return pegs_load_and_apply_gene_set_statistics_to_runtime(
+        runtime_state,
+        stats_in,
+        stats_id_col=stats_id_col,
+        stats_exp_beta_tilde_col=stats_exp_beta_tilde_col,
+        stats_beta_tilde_col=stats_beta_tilde_col,
+        stats_p_col=stats_p_col,
+        stats_se_col=stats_se_col,
+        stats_beta_col=stats_beta_col,
+        stats_beta_uncorrected_col=stats_beta_uncorrected_col,
+        ignore_negative_exp_beta=ignore_negative_exp_beta,
+        max_gene_set_p=max_gene_set_p,
+        min_gene_set_beta=min_gene_set_beta,
+        min_gene_set_beta_uncorrected=min_gene_set_beta_uncorrected,
+        return_only_ids=return_only_ids,
+        open_text_fn=open_gz,
+        get_col_fn=runtime_state._get_col,
+        parse_log_fn=lambda message: log(message, INFO),
+        apply_log_fn=lambda message: log(message, DEBUG),
+        warn_fn=warn,
+        bail_fn=bail,
+    )
+
+
+def _read_gene_set_phewas_statistics(
+    runtime_state,
+    stats_in,
+    *,
+    stats_id_col=None,
+    stats_pheno_col=None,
+    stats_beta_col=None,
+    stats_beta_uncorrected_col=None,
+    min_gene_set_beta=None,
+    min_gene_set_beta_uncorrected=None,
+    update_X=False,
+    phenos_to_match=None,
+    return_only_ids=False,
+    max_num_entries_at_once=None,
+):
+    return pegs_load_and_apply_gene_set_phewas_statistics_to_runtime(
+        runtime_state,
+        stats_in,
+        stats_id_col=stats_id_col,
+        stats_pheno_col=stats_pheno_col,
+        stats_beta_col=stats_beta_col,
+        stats_beta_uncorrected_col=stats_beta_uncorrected_col,
+        min_gene_set_beta=min_gene_set_beta,
+        min_gene_set_beta_uncorrected=min_gene_set_beta_uncorrected,
+        update_X=update_X,
+        phenos_to_match=phenos_to_match,
+        return_only_ids=return_only_ids,
+        max_num_entries_at_once=max_num_entries_at_once,
+        open_text_fn=open_gz,
+        get_col_fn=runtime_state._get_col,
+        construct_map_to_ind_fn=pegs_construct_map_to_ind,
+        warn_fn=warn,
+        bail_fn=bail,
+        log_fn=lambda message: log(message, DEBUG),
+    )
+
+
 def _derive_factor_anchor_masks(g, options):
     return pegs_derive_factor_anchor_masks(
         genes=g.genes,
@@ -9106,7 +9139,17 @@ def _load_factor_phewas_inputs(g, options):
     # from standalone PheWAS execution which is handled in a separate stage.
     factor_input_data = _derive_factor_anchor_masks(g, options)
     if options.gene_set_phewas_stats_in is not None:
-        g.read_gene_set_phewas_statistics(options.gene_set_phewas_stats_in, stats_id_col=options.gene_set_phewas_stats_id_col, stats_pheno_col=options.gene_set_phewas_stats_pheno_col, stats_beta_col=options.gene_set_phewas_stats_beta_col, stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col, min_gene_set_beta=options.min_gene_set_read_beta, min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected, max_num_entries_at_once=options.max_read_entries_at_once)
+        _read_gene_set_phewas_statistics(
+            g,
+            options.gene_set_phewas_stats_in,
+            stats_id_col=options.gene_set_phewas_stats_id_col,
+            stats_pheno_col=options.gene_set_phewas_stats_pheno_col,
+            stats_beta_col=options.gene_set_phewas_stats_beta_col,
+            stats_beta_uncorrected_col=options.gene_set_phewas_stats_beta_uncorrected_col,
+            min_gene_set_beta=options.min_gene_set_read_beta,
+            min_gene_set_beta_uncorrected=options.min_gene_set_read_beta_uncorrected,
+            max_num_entries_at_once=options.max_read_entries_at_once,
+        )
         factor_input_data.loaded_gene_set_phewas_stats = True
 
     if options.gene_phewas_bfs_in:
