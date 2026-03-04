@@ -73,6 +73,8 @@ try:
         coerce_option_int_list as pegs_coerce_option_int_list,
         configure_random_seed as pegs_configure_random_seed,
         clean_chrom_name as pegs_clean_chrom_name,
+        parse_gene_map_file as pegs_parse_gene_map_file,
+        read_loc_file_with_gene_map as pegs_read_loc_file_with_gene_map,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
@@ -137,6 +139,8 @@ except ImportError:
         coerce_option_int_list as pegs_coerce_option_int_list,
         configure_random_seed as pegs_configure_random_seed,
         clean_chrom_name as pegs_clean_chrom_name,
+        parse_gene_map_file as pegs_parse_gene_map_file,
+        read_loc_file_with_gene_map as pegs_read_loc_file_with_gene_map,
         complete_p_beta_se as pegs_complete_p_beta_se,
         construct_map_to_ind as pegs_construct_map_to_ind,
         emit_stderr_warning as pegs_emit_stderr_warning,
@@ -1455,31 +1459,13 @@ class EagglState(object):
         self.gene_label_map = self._read_gene_map(gene_map_in, gene_map_orig_gene_col, gene_map_new_gene_col, allow_multi)         
 
     def _read_gene_map(self, gene_map_in, gene_map_orig_gene_col=1, gene_map_new_gene_col=2, allow_multi=False):
-
-        gene_label_map = {}
-
-        gene_map_orig_gene_col -= 1
-        if gene_map_orig_gene_col < 0:
-            bail("--gene-map-orig-gene-col must be greater than 1")
-        gene_map_new_gene_col -= 1
-        if gene_map_new_gene_col < 0:
-            bail("--gene-map-new-gene-col must be greater than 1")
-
-        with open(gene_map_in) as map_fh:
-            for line in map_fh:
-                cols = line.strip('\n').split()
-                if len(cols) <= gene_map_orig_gene_col or len(cols) <= gene_map_new_gene_col:
-                    bail("Not enough columns in --gene-map-in:\n\t%s" % line)
-
-                orig_gene = cols[0]
-                new_gene = cols[1]
-                if allow_multi:
-                    if orig_gene not in gene_label_map:
-                        gene_label_map[orig_gene] = set()
-                    gene_label_map[orig_gene].add(new_gene)
-                else:
-                    gene_label_map[orig_gene] = new_gene
-        return gene_label_map
+        return pegs_parse_gene_map_file(
+            gene_map_in,
+            gene_map_orig_gene_col=gene_map_orig_gene_col,
+            gene_map_new_gene_col=gene_map_new_gene_col,
+            allow_multi=allow_multi,
+            bail_fn=bail,
+        )
 
     #this reads a V matrix directly from a file
     #it does not initialize an X matrix; if the X-matrix is needed, read_X should be used instead
@@ -5140,72 +5126,15 @@ class EagglState(object):
 
 
     def _read_loc_file(self, loc_file, return_intervals=False, hold_out_chrom=None):
-
-        gene_to_chrom = {}
-        gene_to_pos = {}
-        gene_chrom_name_pos = {}
-
-        chrom_interval_to_gene = {}
-
-        with open(loc_file) as loc_fh:
-            for line in loc_fh:
-                cols = line.strip('\n').split()
-                if len(cols) != 6:
-                    bail("Format for --gene-loc-file is:\n\tgene_id\tchrom\tstart\tstop\tstrand\tgene_name\nOffending line:\n\t%s" % line)
-                gene = cols[5]
-                if self.gene_label_map is not None and gene in self.gene_label_map:
-                    gene = self.gene_label_map[gene]
-                chrom = self._clean_chrom(cols[1])
-                if hold_out_chrom is not None and chrom == hold_out_chrom:
-                    continue
-                pos1 = int(cols[2])
-                pos2 = int(cols[3])
-
-                if gene in gene_to_chrom and gene_to_chrom[gene] != chrom:
-                    warn("Gene %s appears multiple times with different chromosomes; keeping only first" % gene)
-                    continue
-
-                if gene in gene_to_pos and np.abs(np.mean(gene_to_pos[gene]) - np.mean((pos1,pos2))) > 1e7:
-                    warn("Gene %s appears multiple times with far away positions; keeping only first" % gene)
-                    continue
-
-                gene_to_chrom[gene] = chrom
-                gene_to_pos[gene] = (pos1, pos2)
-
-                if chrom not in gene_chrom_name_pos:
-                    gene_chrom_name_pos[chrom] = {}
-                if gene not in gene_chrom_name_pos[chrom]:
-                    gene_chrom_name_pos[chrom][gene] = set()
-                if pos1 not in gene_chrom_name_pos[chrom][gene]:
-                    gene_chrom_name_pos[chrom][gene].add(pos1)
-                if pos2 not in gene_chrom_name_pos[chrom][gene]:
-                    gene_chrom_name_pos[chrom][gene].add(pos2)
-
-                if pos2 < pos1:
-                    t = pos1
-                    pos1 = pos2
-                    pos2 = t
-
-                if return_intervals:
-                    if chrom not in chrom_interval_to_gene:
-                        chrom_interval_to_gene[chrom] = {}
-
-                    if (pos1, pos2) not in chrom_interval_to_gene[chrom]:
-                        chrom_interval_to_gene[chrom][(pos1, pos2)] = []
-
-                    chrom_interval_to_gene[chrom][(pos1, pos2)].append(gene) 
-
-                #we consider distance to a gene to be both its start, its end, and also intermediate points within it
-                #split_gene_length determines how many intermediate points there are
-                split_gene_length = 1000000
-                if pos2 > pos1:
-                    for posm in range(pos1, pos2, split_gene_length)[1:]:
-                        gene_chrom_name_pos[chrom][gene].add(posm)
-
-        if return_intervals:
-            return chrom_interval_to_gene
-        else:
-            return (gene_chrom_name_pos, gene_to_chrom, gene_to_pos)
+        return pegs_read_loc_file_with_gene_map(
+            loc_file,
+            gene_label_map=self.gene_label_map,
+            return_intervals=return_intervals,
+            hold_out_chrom=hold_out_chrom,
+            clean_chrom_fn=self._clean_chrom,
+            warn_fn=warn,
+            bail_fn=bail,
+        )
 
 
     def _clean_chrom(self, chrom):
