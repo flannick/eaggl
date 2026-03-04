@@ -747,6 +747,24 @@ def _classify_factor_workflow(_options):
 
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
+@dataclass
+class EagglBundleInputResult:
+    bundle: PegsBundleManifest
+    bundle_path: str
+    schema: str
+    applied_defaults: dict = field(default_factory=dict)
+
+    def as_dict(self):
+        return {
+            "bundle_path": self.bundle_path,
+            "extract_dir": self.bundle.extract_dir,
+            "schema": self.schema,
+            "manifest": self.bundle.manifest,
+            "default_inputs": self.bundle.default_inputs,
+            "applied_defaults": self.applied_defaults,
+        }
+
+
 def _load_eaggl_bundle_inputs(bundle_path):
     bundle = PegsBundleManifest.load_defaults(
         bundle_path=bundle_path,
@@ -758,14 +776,11 @@ def _load_eaggl_bundle_inputs(bundle_path):
         bail_fn=bail,
     )
     _EAGGL_BUNDLE_TEMP_DIRS.append(bundle.extract_dir)
-
-    return {
-        "bundle_path": bundle_path,
-        "extract_dir": bundle.extract_dir,
-        "schema": PEGS_EAGGL_BUNDLE_SCHEMA,
-        "manifest": bundle.manifest,
-        "default_inputs": bundle.default_inputs,
-    }
+    return EagglBundleInputResult(
+        bundle=bundle,
+        bundle_path=bundle_path,
+        schema=PEGS_EAGGL_BUNDLE_SCHEMA,
+    )
 
 
 def _apply_eaggl_bundle_inputs(_options):
@@ -773,7 +788,7 @@ def _apply_eaggl_bundle_inputs(_options):
         return None
 
     bundle_info = _load_eaggl_bundle_inputs(_options.eaggl_bundle_in)
-    defaults = bundle_info["default_inputs"]
+    defaults = bundle_info.bundle.default_inputs
     applied = {}
 
     has_explicit_x_source = (
@@ -794,7 +809,7 @@ def _apply_eaggl_bundle_inputs(_options):
             setattr(_options, key, defaults[key])
             applied[key] = defaults[key]
 
-    bundle_info["applied_defaults"] = applied
+    bundle_info.applied_defaults = applied
     return bundle_info
 
 argv_parse = sys.argv[1:]
@@ -893,7 +908,7 @@ def query_lmm(query, auth_key=None, lmm_model=None, lmm_provider="openai"):
 
 eaggl_bundle_info = _apply_eaggl_bundle_inputs(options)
 if eaggl_bundle_info is not None:
-    applied = eaggl_bundle_info.get("applied_defaults", {})
+    applied = eaggl_bundle_info.applied_defaults
     if len(applied) == 0:
         log("Loaded --eaggl-bundle-in bundle %s (no defaults applied; explicit CLI/config inputs took precedence)" % options.eaggl_bundle_in, INFO)
     else:
@@ -1072,7 +1087,7 @@ if options.print_effective_config:
     if factor_workflow is not None:
         effective_config["factor_workflow"] = _json_safe(factor_workflow)
     if eaggl_bundle_info is not None:
-        effective_config["eaggl_bundle"] = _json_safe(eaggl_bundle_info)
+        effective_config["eaggl_bundle"] = _json_safe(eaggl_bundle_info.as_dict())
     sys.stdout.write("%s\n" % json.dumps(effective_config, indent=2, sort_keys=True))
     sys.exit(0)
 
