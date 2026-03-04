@@ -4997,14 +4997,6 @@ class EagglState(object):
     def _determine_columns(self, filename):
         bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
 
-    def _complete_p_beta_se(self, p, beta, se):
-        return pegs_complete_p_beta_se(
-            p,
-            beta,
-            se,
-            warn_fn=warn,
-        )
-        
     def _distill_huge_signal_bfs(self, huge_signal_bfs, huge_signal_posteriors, huge_signal_sum_gene_cond_probabilities, huge_signal_mean_gene_pos, huge_signal_max_closest_gene_prob, cap_region_posterior, scale_region_posterior, phantom_region_posterior, allow_evidence_of_absence, gene_covariates, gene_covariates_mask, gene_covariates_mat_inv, gene_covariate_names, gene_covariate_intercept_index, gene_prob_genes, total_genes=None, rel_prior_log_bf=None):
         bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
 
