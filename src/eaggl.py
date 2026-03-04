@@ -3282,6 +3282,77 @@ class EagglState(object):
         setattr(self, "%s_p_values" % output_base, updated_p_value)
         setattr(self, "%s_one_sided_p_values" % output_base, updated_one_sided)
 
+    def _run_factor_phewas_batch(self, input_values, factor_keep_mask, gene_pheno_Y, gene_pheno_combined_prior_Ys, begin, end, phewas_beta_kwargs):
+        if gene_pheno_Y is not None:
+            _, _, beta_tilde, se, z_score, p_value, one_sided_p_value = self._calculate_phewas_block(
+                input_values[factor_keep_mask, :],
+                gene_pheno_Y[factor_keep_mask, :].T,
+                multivariate=True,
+                covs=self.Y[factor_keep_mask],
+                **phewas_beta_kwargs
+            )
+            self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, z_score, p_value, one_sided_p_value)
+
+            if not options.debug_skip_huber:
+                _, _, beta_tilde, se, z_score, p_value, one_sided_p_value = self._calculate_phewas_block(
+                    input_values[factor_keep_mask, :],
+                    gene_pheno_Y[factor_keep_mask, :].T,
+                    multivariate=True,
+                    covs=self.Y[factor_keep_mask],
+                    huber=True,
+                    **phewas_beta_kwargs
+                )
+                self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, z_score, p_value, one_sided_p_value, huber=True)
+
+        if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
+            _, _, beta_tilde, se, z_score, p_value, one_sided_p_value = self._calculate_phewas_block(
+                input_values[factor_keep_mask, :],
+                gene_pheno_combined_prior_Ys[factor_keep_mask, :].T,
+                X_orig=self.X_orig[factor_keep_mask, :],
+                X_phewas_beta=self.X_phewas_beta[begin:end, :] if self.X_phewas_beta is not None else None,
+                Y_resid=gene_pheno_Y[factor_keep_mask, :].T,
+                multivariate=True,
+                covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
+                **phewas_beta_kwargs
+            )
+            self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, z_score, p_value, one_sided_p_value)
+
+            if not options.debug_skip_huber:
+                _, _, beta_tilde, se, z_score, p_value, one_sided_p_value = self._calculate_phewas_block(
+                    input_values[factor_keep_mask, :],
+                    gene_pheno_combined_prior_Ys[factor_keep_mask, :].T,
+                    X_orig=self.X_orig[factor_keep_mask, :],
+                    X_phewas_beta=self.X_phewas_beta[begin:end, :] if self.X_phewas_beta is not None else None,
+                    Y_resid=gene_pheno_Y[factor_keep_mask, :].T,
+                    multivariate=True,
+                    covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
+                    huber=True,
+                    **phewas_beta_kwargs
+                )
+                self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, z_score, p_value, one_sided_p_value, huber=True)
+
+    def _run_standard_phewas_batch(self, input_values, gene_pheno_Y, gene_pheno_combined_prior_Ys, begin, end, phewas_beta_kwargs):
+        if gene_pheno_Y is not None:
+            beta, _, beta_tilde, se, z_score, p_value, _ = self._calculate_phewas_block(
+                input_values,
+                gene_pheno_Y.T,
+                **phewas_beta_kwargs
+            )
+            assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
+            self._accumulate_standard_phewas_outputs("pheno_Y", beta, beta_tilde, se, z_score, p_value)
+
+        if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
+            beta, _, beta_tilde, se, z_score, p_value, _ = self._calculate_phewas_block(
+                input_values,
+                gene_pheno_combined_prior_Ys.T,
+                X_orig=self.X_orig,
+                X_phewas_beta=self.X_phewas_beta[begin:end, :] if self.X_phewas_beta is not None else None,
+                Y_resid=gene_pheno_Y.T,
+                **phewas_beta_kwargs
+            )
+            assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
+            self._accumulate_standard_phewas_outputs("pheno_combined_prior_Ys", beta, beta_tilde, se, z_score, p_value)
+
     def run_phewas(self, gene_phewas_bfs_in=None, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None, run_for_factors=False, max_num_burn_in=1000, max_num_iter=1100, min_num_iter=10, num_chains=10, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, max_frac_sem=0.01, gauss_seidel=False, sparse_solution=False, sparse_frac_betas=None, batch_size=1500, min_gene_factor_weight=0, **kwargs):
 
         #require X matrix
@@ -3369,80 +3440,25 @@ class EagglState(object):
                 gene_pheno_Y = self.gene_pheno_Y[:,begin:end].toarray() if self.gene_pheno_Y is not None else None
                 gene_pheno_combined_prior_Ys = self.gene_pheno_combined_prior_Ys[:,begin:end].toarray() if self.gene_pheno_combined_prior_Ys is not None else None
 
-
             if run_for_factors:
-                #in multivariate mode the returned beta tildes are actually betas
-                if gene_pheno_Y is not None:
-                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
-                        input_values[factor_keep_mask,:],
-                        gene_pheno_Y[factor_keep_mask,:].T,
-                        multivariate=True,
-                        covs=self.Y[factor_keep_mask],
-                        **phewas_beta_kwargs
-                    )
-                    self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, Z, p_value, one_sided_p_value)
-
-                    if not options.debug_skip_huber:
-                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
-                            input_values[factor_keep_mask,:],
-                            gene_pheno_Y[factor_keep_mask,:].T,
-                            multivariate=True,
-                            covs=self.Y[factor_keep_mask],
-                            huber=True,
-                            **phewas_beta_kwargs
-                        )
-                        self._accumulate_factor_phewas_outputs("Y", beta_tilde, se, Z, p_value, one_sided_p_value, huber=True)
-
-                if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
-
-                    _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
-                        input_values[factor_keep_mask,:],
-                        gene_pheno_combined_prior_Ys[factor_keep_mask,:].T,
-                        X_orig=self.X_orig[factor_keep_mask,:],
-                        X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
-                        Y_resid=gene_pheno_Y[factor_keep_mask,:].T,
-                        multivariate=True,
-                        covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
-                        **phewas_beta_kwargs
-                    )
-                    self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, Z, p_value, one_sided_p_value)
-
-                    if not options.debug_skip_huber:
-
-                        _, _, beta_tilde, se, Z, p_value, one_sided_p_value = self._calculate_phewas_block(
-                            input_values[factor_keep_mask,:],
-                            gene_pheno_combined_prior_Ys[factor_keep_mask,:].T,
-                            X_orig=self.X_orig[factor_keep_mask,:],
-                            X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
-                            Y_resid=gene_pheno_Y[factor_keep_mask,:].T,
-                            multivariate=True,
-                            covs=self.combined_prior_Ys[factor_keep_mask] if self.combined_prior_Ys is not None else self.Y[factor_keep_mask],
-                            huber=True,
-                            **phewas_beta_kwargs
-                        )
-                        self._accumulate_factor_phewas_outputs("combined_prior_Ys", beta_tilde, se, Z, p_value, one_sided_p_value, huber=True)
+                self._run_factor_phewas_batch(
+                    input_values=input_values,
+                    factor_keep_mask=factor_keep_mask,
+                    gene_pheno_Y=gene_pheno_Y,
+                    gene_pheno_combined_prior_Ys=gene_pheno_combined_prior_Ys,
+                    begin=begin,
+                    end=end,
+                    phewas_beta_kwargs=phewas_beta_kwargs,
+                )
             else:
-                if gene_pheno_Y is not None:
-                    beta, _, beta_tilde, se, Z, p_value, _ = self._calculate_phewas_block(
-                        input_values,
-                        gene_pheno_Y.T,
-                        **phewas_beta_kwargs
-                    )
-                    assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
-                    self._accumulate_standard_phewas_outputs("pheno_Y", beta, beta_tilde, se, Z, p_value)
-
-                if gene_pheno_combined_prior_Ys is not None and not options.debug_skip_correlation:
-                    #we have to use the correlations here
-                    beta, _, beta_tilde, se, Z, p_value, _ = self._calculate_phewas_block(
-                        input_values,
-                        gene_pheno_combined_prior_Ys.T,
-                        X_orig=self.X_orig,
-                        X_phewas_beta=self.X_phewas_beta[begin:end,:] if self.X_phewas_beta is not None else None,
-                        Y_resid=gene_pheno_Y.T,
-                        **phewas_beta_kwargs
-                    )
-                    assert beta.shape[0] == 3, "First dimension of beta should be 3, not (%s, %s)" % (beta.shape[0], beta.shape[1])
-                    self._accumulate_standard_phewas_outputs("pheno_combined_prior_Ys", beta, beta_tilde, se, Z, p_value)
+                self._run_standard_phewas_batch(
+                    input_values=input_values,
+                    gene_pheno_Y=gene_pheno_Y,
+                    gene_pheno_combined_prior_Ys=gene_pheno_combined_prior_Ys,
+                    begin=begin,
+                    end=end,
+                    phewas_beta_kwargs=phewas_beta_kwargs,
+                )
 
     def get_col_sums(self, X, num_nonzero=False, axis=0):
         if num_nonzero:
