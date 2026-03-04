@@ -89,6 +89,7 @@ try:
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        apply_bundle_defaults_to_options as pegs_apply_bundle_defaults_to_options,
         BundleManifest as PegsBundleManifest,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
@@ -153,6 +154,7 @@ except ImportError:
         open_text_with_retry as pegs_open_text_with_retry,
         resolve_column_index as pegs_resolve_column_index,
         resolve_config_path_value as pegs_resolve_config_path_value,
+        apply_bundle_defaults_to_options as pegs_apply_bundle_defaults_to_options,
         BundleManifest as PegsBundleManifest,
         EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
@@ -747,24 +749,6 @@ def _classify_factor_workflow(_options):
 
 _EAGGL_BUNDLE_TEMP_DIRS = []
 
-@dataclass
-class EagglBundleInputResult:
-    bundle: PegsBundleManifest
-    bundle_path: str
-    schema: str
-    applied_defaults: dict = field(default_factory=dict)
-
-    def as_dict(self):
-        return {
-            "bundle_path": self.bundle_path,
-            "extract_dir": self.bundle.extract_dir,
-            "schema": self.schema,
-            "manifest": self.bundle.manifest,
-            "default_inputs": self.bundle.default_inputs,
-            "applied_defaults": self.applied_defaults,
-        }
-
-
 def _load_eaggl_bundle_inputs(bundle_path):
     bundle = PegsBundleManifest.load_defaults(
         bundle_path=bundle_path,
@@ -776,41 +760,22 @@ def _load_eaggl_bundle_inputs(bundle_path):
         bail_fn=bail,
     )
     _EAGGL_BUNDLE_TEMP_DIRS.append(bundle.extract_dir)
-    return EagglBundleInputResult(
-        bundle=bundle,
-        bundle_path=bundle_path,
-        schema=PEGS_EAGGL_BUNDLE_SCHEMA,
-    )
+    return bundle
 
 
 def _apply_eaggl_bundle_inputs(_options):
     if _options.eaggl_bundle_in is None:
         return None
 
-    bundle_info = _load_eaggl_bundle_inputs(_options.eaggl_bundle_in)
-    defaults = bundle_info.bundle.default_inputs
-    applied = {}
-
-    has_explicit_x_source = (
-        _options.X_in is not None
-        or _options.X_list is not None
-        or _options.Xd_in is not None
-        or _options.Xd_list is not None
+    bundle = _load_eaggl_bundle_inputs(_options.eaggl_bundle_in)
+    return pegs_apply_bundle_defaults_to_options(
+        _options,
+        bundle,
+        x_source_option_names=["X_in", "X_list", "Xd_in", "Xd_list"],
+        x_default_key="X_in",
+        x_target_option_name="X_in",
+        scalar_default_option_names=["gene_stats_in", "gene_set_stats_in", "gene_phewas_bfs_in", "gene_set_phewas_stats_in"],
     )
-    if "X_in" in defaults and not has_explicit_x_source:
-        _options.X_in = [defaults["X_in"]]
-        applied["X_in"] = defaults["X_in"]
-
-    scalar_default_keys = ["gene_stats_in", "gene_set_stats_in", "gene_phewas_bfs_in", "gene_set_phewas_stats_in"]
-    for key in scalar_default_keys:
-        if key not in defaults:
-            continue
-        if getattr(_options, key) is None:
-            setattr(_options, key, defaults[key])
-            applied[key] = defaults[key]
-
-    bundle_info.applied_defaults = applied
-    return bundle_info
 
 argv_parse = sys.argv[1:]
 pegs_fail_removed_cli_aliases(
