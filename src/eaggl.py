@@ -33,7 +33,7 @@ try:
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
         initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
-        maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
+        maybe_prepare_filtered_correlation as pegs_maybe_prepare_filtered_correlation,
         resolve_read_x_run_logistic as pegs_resolve_read_x_run_logistic,
         record_read_x_counts as pegs_record_read_x_counts,
         standardize_qc_metrics_after_x_read as pegs_standardize_qc_metrics_after_x_read,
@@ -120,7 +120,7 @@ except ImportError:
         callback_set_comma_separated_args_as_set as pegs_callback_set_comma_separated_args_as_set,
         initialize_read_x_batch_seed_state as pegs_initialize_read_x_batch_seed_state,
         initialize_filtered_gene_set_state as pegs_initialize_filtered_gene_set_state,
-        maybe_prepare_filtered_gls_correlation as pegs_maybe_prepare_filtered_gls_correlation,
+        maybe_prepare_filtered_correlation as pegs_maybe_prepare_filtered_correlation,
         resolve_read_x_run_logistic as pegs_resolve_read_x_run_logistic,
         record_read_x_counts as pegs_record_read_x_counts,
         standardize_qc_metrics_after_x_read as pegs_standardize_qc_metrics_after_x_read,
@@ -6990,7 +6990,7 @@ def _run_read_x_stage(runtime, X_in, **read_x_kwargs):
     return _read_x_pipeline(runtime, X_in, **read_x_kwargs)
 
 
-def _read_x_pipeline(runtime, X_in, Xd_in=None, X_list=None, Xd_list=None, V_in=None, skip_V=True, force_reread=False, min_gene_set_size=1, max_gene_set_size=30000, only_ids=None, only_inc_genes=None, fraction_inc_genes=None, add_all_genes=False, prune_gene_sets=0.8, weighted_prune_gene_sets=None, prune_deterministically=False, x_sparsify=[50,100,200,500,1000], add_ext=False, add_top=True, add_bottom=True, filter_negative=True, threshold_weights=0.5, cap_weights=True, permute_gene_sets=False, max_gene_set_p=None, filter_gene_set_p=1, filter_using_phewas=False, increase_filter_gene_set_p=0.01, max_num_gene_sets_initial=None, max_num_gene_sets=None, max_num_gene_sets_hyper=None, skip_betas=False, run_logistic=True, max_for_linear=0.95, filter_gene_set_metric_z=2.5, initial_p=0.01, xin_to_p_noninf_ind=None, initial_sigma2=1e-3, initial_sigma2_cond=None, sigma_power=0, sigma_soft_threshold_95=None, sigma_soft_threshold_5=None, run_gls=False, run_corrected_ols=False, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, update_hyper_p=False, update_hyper_sigma=False, batch_all_for_hyper=False, first_for_hyper=False, first_max_p_for_hyper=False, first_for_sigma_cond=False, sigma_num_devs_to_top=2.0, p_noninf_inflate=1, batch_separator="@", ignore_genes=set(["NA"]), file_separator=None, max_num_burn_in=None, max_num_iter_betas=1100, min_num_iter_betas=10, num_chains_betas=10, r_threshold_burn_in_betas=1.01, use_max_r_for_convergence_betas=True, max_frac_sem_betas=0.01, max_allowed_batch_correlation=None, sparse_solution=False, sparse_frac_betas=None, betas_trace_out=None, show_progress=True, max_num_entries_at_once=None):
+def _read_x_pipeline(runtime, X_in, Xd_in=None, X_list=None, Xd_list=None, V_in=None, skip_V=True, force_reread=False, min_gene_set_size=1, max_gene_set_size=30000, only_ids=None, only_inc_genes=None, fraction_inc_genes=None, add_all_genes=False, prune_gene_sets=0.8, weighted_prune_gene_sets=None, prune_deterministically=False, x_sparsify=[50,100,200,500,1000], add_ext=False, add_top=True, add_bottom=True, filter_negative=True, threshold_weights=0.5, cap_weights=True, permute_gene_sets=False, max_gene_set_p=None, filter_gene_set_p=1, filter_using_phewas=False, increase_filter_gene_set_p=0.01, max_num_gene_sets_initial=None, max_num_gene_sets=None, max_num_gene_sets_hyper=None, skip_betas=False, run_logistic=True, max_for_linear=0.95, filter_gene_set_metric_z=2.5, initial_p=0.01, xin_to_p_noninf_ind=None, initial_sigma2=1e-3, initial_sigma2_cond=None, sigma_power=0, sigma_soft_threshold_95=None, sigma_soft_threshold_5=None, run_corrected_ols=False, correct_betas_mean=True, correct_betas_var=True, gene_loc_file=None, gene_cor_file=None, gene_cor_file_gene_col=1, gene_cor_file_cor_start_col=10, update_hyper_p=False, update_hyper_sigma=False, batch_all_for_hyper=False, first_for_hyper=False, first_max_p_for_hyper=False, first_for_sigma_cond=False, sigma_num_devs_to_top=2.0, p_noninf_inflate=1, batch_separator="@", ignore_genes=set(["NA"]), file_separator=None, max_num_burn_in=None, max_num_iter_betas=1100, min_num_iter_betas=10, num_chains_betas=10, r_threshold_burn_in_betas=1.01, use_max_r_for_convergence_betas=True, max_frac_sem_betas=0.01, max_allowed_batch_correlation=None, sparse_solution=False, sparse_frac_betas=None, betas_trace_out=None, show_progress=True, max_num_entries_at_once=None):
     if not force_reread and runtime.X_orig is not None:
         return
 
