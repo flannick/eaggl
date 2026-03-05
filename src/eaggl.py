@@ -1493,59 +1493,6 @@ class EagglState(object):
     def combine_huge_scores(self):
         bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
 
-    def _reread_gene_phewas_bfs(self):
-        if self.cached_gene_phewas_call is not None:
-            log("Rereading gene phewas bfs...")
-            self.read_gene_phewas_bfs(**self.cached_gene_phewas_call)
-
-    def read_gene_phewas_bfs(self, gene_phewas_bfs_in, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, anchor_genes=None, anchor_phenos=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None, phewas_gene_to_X_gene_in=None, min_value=None, max_num_entries_at_once=None, **kwargs):
-
-        cached = dict(locals())
-        cached.pop("self", None)
-        cached.pop("kwargs")
-        self.cached_gene_phewas_call = cached
-
-        #require X matrix
-
-        if gene_phewas_bfs_in is None:
-            bail("Require --gene-stats-in or --gene-phewas-bfs-in for this operation")
-
-        log("Reading --gene-phewas-bfs-in file %s" % gene_phewas_bfs_in, INFO)
-
-        if self.genes is None:
-            bail("Need to initialixe --X before reading gene_phewas")
-
-        phewas_gene_to_X_gene = None
-        if phewas_gene_to_X_gene_in is not None:
-            phewas_gene_to_X_gene = pegs_parse_gene_map_file(
-                phewas_gene_to_X_gene_in,
-                allow_multi=True,
-                bail_fn=bail,
-            )
-
-        pegs_load_and_apply_gene_phewas_bfs_to_runtime(
-            self,
-            gene_phewas_bfs_in,
-            gene_phewas_bfs_id_col=gene_phewas_bfs_id_col,
-            gene_phewas_bfs_pheno_col=gene_phewas_bfs_pheno_col,
-            anchor_genes=anchor_genes,
-            anchor_phenos=anchor_phenos,
-            gene_phewas_bfs_log_bf_col=gene_phewas_bfs_log_bf_col,
-            gene_phewas_bfs_combined_col=gene_phewas_bfs_combined_col,
-            gene_phewas_bfs_prior_col=gene_phewas_bfs_prior_col,
-            phewas_gene_to_x_gene=phewas_gene_to_X_gene,
-            min_value=min_value,
-            max_num_entries_at_once=max_num_entries_at_once,
-            open_text_fn=open_gz,
-            get_col_fn=self._get_col,
-            construct_map_to_ind_fn=pegs_construct_map_to_ind,
-            warn_fn=warn,
-            bail_fn=bail,
-            log_fn=lambda message: log(message, DEBUG),
-        )
-        self.phewas_state = pegs_sync_phewas_runtime_state(self)
-
-
     def has_gene_sets(self):
         return self.X_orig is not None and self.X_orig.shape[1] > 0
 
@@ -7461,7 +7408,7 @@ class EagglState(object):
 
         if self.gene_pheno_Y is not None or self.gene_pheno_combined_prior_Ys is not None or self.gene_pheno_priors is not None:
             if len(self.genes) != self.gene_pheno_Y.shape[0]:
-                self._reread_gene_phewas_bfs()
+                _reread_gene_phewas_bfs(self)
 
         if self.genes is not None:
             self.gene_to_ind = pegs_construct_map_to_ind(self.genes)
@@ -9126,6 +9073,71 @@ def _derive_factor_anchor_masks(g, options):
     )
 
 
+def _read_gene_phewas_bfs(
+    state,
+    gene_phewas_bfs_in,
+    gene_phewas_bfs_id_col=None,
+    gene_phewas_bfs_pheno_col=None,
+    anchor_genes=None,
+    anchor_phenos=None,
+    gene_phewas_bfs_log_bf_col=None,
+    gene_phewas_bfs_combined_col=None,
+    gene_phewas_bfs_prior_col=None,
+    phewas_gene_to_X_gene_in=None,
+    min_value=None,
+    max_num_entries_at_once=None,
+    **kwargs
+):
+    cached = dict(locals())
+    cached.pop("state", None)
+    cached.pop("kwargs", None)
+    state.cached_gene_phewas_call = cached
+
+    if gene_phewas_bfs_in is None:
+        bail("Require --gene-stats-in or --gene-phewas-bfs-in for this operation")
+
+    log("Reading --gene-phewas-bfs-in file %s" % gene_phewas_bfs_in, INFO)
+    if state.genes is None:
+        bail("Need to initialixe --X before reading gene_phewas")
+
+    phewas_gene_to_X_gene = None
+    if phewas_gene_to_X_gene_in is not None:
+        phewas_gene_to_X_gene = pegs_parse_gene_map_file(
+            phewas_gene_to_X_gene_in,
+            allow_multi=True,
+            bail_fn=bail,
+        )
+
+    pegs_load_and_apply_gene_phewas_bfs_to_runtime(
+        state,
+        gene_phewas_bfs_in,
+        gene_phewas_bfs_id_col=gene_phewas_bfs_id_col,
+        gene_phewas_bfs_pheno_col=gene_phewas_bfs_pheno_col,
+        anchor_genes=anchor_genes,
+        anchor_phenos=anchor_phenos,
+        gene_phewas_bfs_log_bf_col=gene_phewas_bfs_log_bf_col,
+        gene_phewas_bfs_combined_col=gene_phewas_bfs_combined_col,
+        gene_phewas_bfs_prior_col=gene_phewas_bfs_prior_col,
+        phewas_gene_to_x_gene=phewas_gene_to_X_gene,
+        min_value=min_value,
+        max_num_entries_at_once=max_num_entries_at_once,
+        open_text_fn=open_gz,
+        get_col_fn=state._get_col,
+        construct_map_to_ind_fn=pegs_construct_map_to_ind,
+        warn_fn=warn,
+        bail_fn=bail,
+        log_fn=lambda message: log(message, DEBUG),
+    )
+    state.phewas_state = pegs_sync_phewas_runtime_state(state)
+
+
+def _reread_gene_phewas_bfs(state):
+    if state.cached_gene_phewas_call is None:
+        return
+    log("Rereading gene phewas bfs...")
+    _read_gene_phewas_bfs(state, **state.cached_gene_phewas_call)
+
+
 def _load_factor_phewas_inputs(g, options):
     # Factor/projection workflows consume these as matrix inputs; this is distinct
     # from standalone PheWAS execution which is handled in a separate stage.
@@ -9145,7 +9157,20 @@ def _load_factor_phewas_inputs(g, options):
         factor_input_data.loaded_gene_set_phewas_stats = True
 
     if options.gene_phewas_bfs_in:
-        g.read_gene_phewas_bfs(gene_phewas_bfs_in=options.gene_phewas_bfs_in,gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col, gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col, anchor_genes=options.anchor_genes, anchor_phenos=options.anchor_phenos, gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col, gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col, gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col, phewas_gene_to_X_gene_in=options.gene_phewas_id_to_X_id, min_value=options.min_gene_phewas_read_value, max_num_entries_at_once=options.max_read_entries_at_once)
+        _read_gene_phewas_bfs(
+            g,
+            gene_phewas_bfs_in=options.gene_phewas_bfs_in,
+            gene_phewas_bfs_id_col=options.gene_phewas_bfs_id_col,
+            gene_phewas_bfs_pheno_col=options.gene_phewas_bfs_pheno_col,
+            anchor_genes=options.anchor_genes,
+            anchor_phenos=options.anchor_phenos,
+            gene_phewas_bfs_log_bf_col=options.gene_phewas_bfs_log_bf_col,
+            gene_phewas_bfs_combined_col=options.gene_phewas_bfs_combined_col,
+            gene_phewas_bfs_prior_col=options.gene_phewas_bfs_prior_col,
+            phewas_gene_to_X_gene_in=options.gene_phewas_id_to_X_id,
+            min_value=options.min_gene_phewas_read_value,
+            max_num_entries_at_once=options.max_read_entries_at_once,
+        )
         factor_input_data.loaded_gene_phewas_bfs = True
     return factor_input_data
 
