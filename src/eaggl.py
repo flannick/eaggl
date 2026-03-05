@@ -5252,30 +5252,6 @@ class EagglState(object):
                             log("Desired precision achieved; stopping sampling")
                             will_break=True
 
-                        #TODO: STILL FINALIZING HOW TO DO THIS
-                        #avg_m = avg_betas_m
-                        #avg2_m = avg_betas2_m
-
-                        #sem2_m = ((avg2_m / (num_avg - 1)) - np.power(avg_m / num_avg, 2)) / num_avg
-                        #zero_sem2_m = sem2_m == 0
-                        #sem2_m[zero_sem2_m] = 1
-
-                        #max_avg = np.max(np.abs(avg_m / num_avg))
-                        #min_avg = np.min(np.abs(avg_m / num_avg))
-                        #ref_val = max_avg - min_avg
-                        #if ref_val == 0:
-                        #    ref_val = np.sqrt(np.var(curr_post_means_t))
-                        #    if ref_val == 0:
-                        #        ref_val = 1
-
-                        #max_sem = np.max(np.sqrt(sem2_m))
-                        #max_percentage_error = max_sem / ref_val
-
-                        #log("Iteration %d: ref_val=%.3g; max_sem=%.3g; max_ratio=%.3g" % (iteration_num, ref_val, max_sem, max_percentage_error))
-                        #if max_percentage_error < max_frac_sem:
-                        #    log("Desired precision achieved; stopping sampling")
-                        #    break
-                        
             else:
                 if update_hyper_p or update_hyper_sigma:
                     # Hyper-updates use Rao-Blackwellized moments to avoid sigma collapse.
@@ -5901,8 +5877,7 @@ class EagglState(object):
 
         log("Sorting genes", TRACE)
         if self.y_corr_cholesky is not None:
-            #FIXME: subset the cholesky matrix here
-            bail("Sorting genes after setting correlation matrix is not yet implemented")
+            bail("Sorting genes after setting correlation matrix is unsupported")
 
         self.genes = [self.genes[i] for i in sorted_gene_indices]
         self.gene_to_ind = pegs_construct_map_to_ind(self.genes)
