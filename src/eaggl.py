@@ -6544,6 +6544,96 @@ class PhewasStageResult:
 class FactorStageResult:
     ran: bool = False
     workflow_id: str | None = None
+    output_plan: object = None
+
+
+@dataclass
+class FactorWorkflow:
+    workflow_id: str | None = None
+    label: str | None = None
+    factor_gene_set_x_pheno: bool = False
+    use_phewas_for_factoring: bool = False
+    expand_gene_sets: bool = False
+
+
+@dataclass
+class FactorInputs:
+    anchor_gene_mask: object = None
+    anchor_pheno_mask: object = None
+
+
+@dataclass
+class FactorExecutionConfig:
+    max_num_factors: int
+    phi: float
+    alpha0: float
+    beta0: float
+    gene_set_filter_value: object = None
+    gene_or_pheno_filter_value: object = None
+    pheno_prune_value: object = None
+    pheno_prune_number: object = None
+    gene_prune_value: object = None
+    gene_prune_number: object = None
+    gene_set_prune_value: object = None
+    gene_set_prune_number: object = None
+    anchor_pheno_mask: object = None
+    anchor_gene_mask: object = None
+    anchor_any_pheno: bool = False
+    anchor_any_gene: bool = False
+    anchor_gene_set: bool = False
+    run_transpose: bool = True
+    min_lambda_threshold: float = 1e-3
+    lmm_auth_key: object = None
+    lmm_model: object = None
+    lmm_provider: str = "openai"
+    label_gene_sets_only: bool = False
+    label_include_phenos: bool = False
+    label_individually: bool = False
+    project_phenos_from_gene_sets: bool = False
+
+    def to_run_kwargs(self):
+        return {
+            "max_num_factors": self.max_num_factors,
+            "phi": self.phi,
+            "alpha0": self.alpha0,
+            "beta0": self.beta0,
+            "gene_set_filter_value": self.gene_set_filter_value,
+            "gene_or_pheno_filter_value": self.gene_or_pheno_filter_value,
+            "pheno_prune_value": self.pheno_prune_value,
+            "pheno_prune_number": self.pheno_prune_number,
+            "gene_prune_value": self.gene_prune_value,
+            "gene_prune_number": self.gene_prune_number,
+            "gene_set_prune_value": self.gene_set_prune_value,
+            "gene_set_prune_number": self.gene_set_prune_number,
+            "anchor_pheno_mask": self.anchor_pheno_mask,
+            "anchor_gene_mask": self.anchor_gene_mask,
+            "anchor_any_pheno": self.anchor_any_pheno,
+            "anchor_any_gene": self.anchor_any_gene,
+            "anchor_gene_set": self.anchor_gene_set,
+            "run_transpose": self.run_transpose,
+            "min_lambda_threshold": self.min_lambda_threshold,
+            "lmm_auth_key": self.lmm_auth_key,
+            "lmm_model": self.lmm_model,
+            "lmm_provider": self.lmm_provider,
+            "label_gene_sets_only": self.label_gene_sets_only,
+            "label_include_phenos": self.label_include_phenos,
+            "label_individually": self.label_individually,
+            "project_phenos_from_gene_sets": self.project_phenos_from_gene_sets,
+        }
+
+
+@dataclass
+class FactorOutputPlan:
+    factors_out: str | None = None
+    factors_anchor_out: str | None = None
+    gene_set_clusters_out: str | None = None
+    gene_clusters_out: str | None = None
+    pheno_clusters_out: str | None = None
+    gene_set_anchor_clusters_out: str | None = None
+    gene_anchor_clusters_out: str | None = None
+    pheno_anchor_clusters_out: str | None = None
+    gene_pheno_stats_out: str | None = None
+    max_no_write_gene_pheno: object = None
 
 
 @dataclass
@@ -7373,31 +7463,136 @@ def _run_main_phewas_stage(g, options):
     return PhewasStageResult(ran=True, output_path=options.phewas_stats_out)
 
 
-def _run_main_factor_stage(g, options, mode_state, factor_input_state):
-    if options.anchor_gene_set:
-        gene_or_pheno_filter_value = options.gene_set_pheno_filter_value
-    elif mode_state["factor_gene_set_x_pheno"]:
-        gene_or_pheno_filter_value = options.pheno_filter_value
-    else:
-        gene_or_pheno_filter_value = options.gene_filter_value
-
-    g.run_factor(max_num_factors=options.max_num_factors, phi=options.phi, alpha0=options.alpha0, beta0=options.beta0, gene_set_filter_value=options.gene_set_filter_value, gene_or_pheno_filter_value=gene_or_pheno_filter_value, pheno_prune_value=options.factor_prune_phenos_val, pheno_prune_number=options.factor_prune_phenos_num, gene_prune_value=options.factor_prune_genes_val, gene_prune_number=options.factor_prune_genes_num, gene_set_prune_value=options.factor_prune_gene_sets_val, gene_set_prune_number=options.factor_prune_gene_sets_num, anchor_pheno_mask=factor_input_state.anchor_pheno_mask, anchor_gene_mask=factor_input_state.anchor_gene_mask, anchor_any_pheno=options.anchor_any_pheno, anchor_any_gene=options.anchor_any_gene, anchor_gene_set=options.anchor_gene_set, run_transpose=not options.no_transpose, min_lambda_threshold=options.min_lambda_threshold, lmm_auth_key=options.lmm_auth_key, lmm_model=options.lmm_model, lmm_provider=options.lmm_provider, label_gene_sets_only=options.label_gene_sets_only, label_include_phenos=options.label_include_phenos, label_individually=options.label_individually, project_phenos_from_gene_sets=options.project_phenos_from_gene_sets)
+def _extract_factor_workflow(mode_state):
     workflow = mode_state.get("factor_workflow") if isinstance(mode_state, dict) else None
-    workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
-    return FactorStageResult(ran=True, workflow_id=workflow_id)
+    if not isinstance(workflow, dict):
+        return FactorWorkflow()
+    return FactorWorkflow(
+        workflow_id=workflow.get("id"),
+        label=workflow.get("label"),
+        factor_gene_set_x_pheno=bool(workflow.get("factor_gene_set_x_pheno")),
+        use_phewas_for_factoring=bool(workflow.get("use_phewas_for_factoring")),
+        expand_gene_sets=bool(workflow.get("expand_gene_sets")),
+    )
+
+
+def _extract_factor_inputs(factor_input_state):
+    if isinstance(factor_input_state, FactorInputs):
+        return factor_input_state
+    if factor_input_state is None:
+        return FactorInputs()
+    return FactorInputs(
+        anchor_gene_mask=getattr(factor_input_state, "anchor_gene_mask", None)
+        if not isinstance(factor_input_state, dict)
+        else factor_input_state.get("anchor_gene_mask"),
+        anchor_pheno_mask=getattr(factor_input_state, "anchor_pheno_mask", None)
+        if not isinstance(factor_input_state, dict)
+        else factor_input_state.get("anchor_pheno_mask"),
+    )
+
+
+def _resolve_factor_gene_or_pheno_filter_value(options, workflow):
+    if options.anchor_gene_set:
+        return options.gene_set_pheno_filter_value
+    if workflow.factor_gene_set_x_pheno:
+        return options.pheno_filter_value
+    return options.gene_filter_value
+
+
+def _build_factor_execution_config(options, workflow, factor_inputs):
+    return FactorExecutionConfig(
+        max_num_factors=options.max_num_factors,
+        phi=options.phi,
+        alpha0=options.alpha0,
+        beta0=options.beta0,
+        gene_set_filter_value=options.gene_set_filter_value,
+        gene_or_pheno_filter_value=_resolve_factor_gene_or_pheno_filter_value(options, workflow),
+        pheno_prune_value=options.factor_prune_phenos_val,
+        pheno_prune_number=options.factor_prune_phenos_num,
+        gene_prune_value=options.factor_prune_genes_val,
+        gene_prune_number=options.factor_prune_genes_num,
+        gene_set_prune_value=options.factor_prune_gene_sets_val,
+        gene_set_prune_number=options.factor_prune_gene_sets_num,
+        anchor_pheno_mask=factor_inputs.anchor_pheno_mask,
+        anchor_gene_mask=factor_inputs.anchor_gene_mask,
+        anchor_any_pheno=options.anchor_any_pheno,
+        anchor_any_gene=options.anchor_any_gene,
+        anchor_gene_set=options.anchor_gene_set,
+        run_transpose=not options.no_transpose,
+        min_lambda_threshold=options.min_lambda_threshold,
+        lmm_auth_key=options.lmm_auth_key,
+        lmm_model=options.lmm_model,
+        lmm_provider=options.lmm_provider,
+        label_gene_sets_only=options.label_gene_sets_only,
+        label_include_phenos=options.label_include_phenos,
+        label_individually=options.label_individually,
+        project_phenos_from_gene_sets=options.project_phenos_from_gene_sets,
+    )
+
+
+def _run_factor_model(g, factor_config):
+    g.run_factor(**factor_config.to_run_kwargs())
+
+
+def _run_main_factor_stage(g, options, mode_state, factor_input_state):
+    workflow = _extract_factor_workflow(mode_state)
+    factor_inputs = _extract_factor_inputs(factor_input_state)
+    factor_config = _build_factor_execution_config(options, workflow, factor_inputs)
+    _run_factor_model(g, factor_config)
+    return FactorStageResult(ran=True, workflow_id=workflow.workflow_id)
+
+
+def _build_factor_output_plan(options):
+    return FactorOutputPlan(
+        factors_out=options.factors_out,
+        factors_anchor_out=options.factors_anchor_out,
+        gene_set_clusters_out=options.gene_set_clusters_out,
+        gene_clusters_out=options.gene_clusters_out,
+        pheno_clusters_out=options.pheno_clusters_out,
+        gene_set_anchor_clusters_out=options.gene_set_anchor_clusters_out,
+        gene_anchor_clusters_out=options.gene_anchor_clusters_out,
+        pheno_anchor_clusters_out=options.pheno_anchor_clusters_out,
+        gene_pheno_stats_out=options.gene_pheno_stats_out,
+        max_no_write_gene_pheno=options.max_no_write_gene_pheno,
+    )
+
+
+def _write_factor_outputs_for_plan(g, output_plan):
+    if output_plan.factors_out is not None:
+        g.write_matrix_factors(output_plan.factors_out)
+    if output_plan.factors_anchor_out is not None:
+        g.write_matrix_factors(output_plan.factors_anchor_out, write_anchor_specific=True)
+    if (
+        output_plan.gene_set_clusters_out is not None
+        or output_plan.gene_clusters_out is not None
+        or output_plan.pheno_clusters_out is not None
+    ):
+        g.write_clusters(
+            output_plan.gene_set_clusters_out,
+            output_plan.gene_clusters_out,
+            output_plan.pheno_clusters_out,
+        )
+    if (
+        output_plan.gene_set_anchor_clusters_out is not None
+        or output_plan.gene_anchor_clusters_out is not None
+        or output_plan.pheno_anchor_clusters_out is not None
+    ):
+        g.write_clusters(
+            output_plan.gene_set_anchor_clusters_out,
+            output_plan.gene_anchor_clusters_out,
+            output_plan.pheno_anchor_clusters_out,
+            write_anchor_specific=True,
+        )
+    if output_plan.gene_pheno_stats_out is not None:
+        g.write_gene_pheno_statistics(
+            output_plan.gene_pheno_stats_out,
+            min_value_to_print=output_plan.max_no_write_gene_pheno,
+        )
 
 
 def _write_main_factor_outputs(g, options):
-    if options.factors_out is not None:
-        g.write_matrix_factors(options.factors_out)
-    if options.factors_anchor_out is not None:
-        g.write_matrix_factors(options.factors_anchor_out, write_anchor_specific=True)
-    if options.gene_set_clusters_out is not None or options.gene_clusters_out is not None or options.pheno_clusters_out is not None:
-        g.write_clusters(options.gene_set_clusters_out, options.gene_clusters_out, options.pheno_clusters_out)
-    if options.gene_set_anchor_clusters_out is not None or options.gene_anchor_clusters_out is not None or options.pheno_anchor_clusters_out is not None:
-        g.write_clusters(options.gene_set_anchor_clusters_out, options.gene_anchor_clusters_out, options.pheno_anchor_clusters_out, write_anchor_specific=True)
-    if options.gene_pheno_stats_out is not None:
-        g.write_gene_pheno_statistics(options.gene_pheno_stats_out, min_value_to_print=options.max_no_write_gene_pheno)
+    output_plan = _build_factor_output_plan(options)
+    _write_factor_outputs_for_plan(g, output_plan)
 
 
 def _run_main_factor_phewas_stage(g, options):
