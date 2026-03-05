@@ -1095,6 +1095,51 @@ def _append_with_any_user(P):
     return np.hstack((P, 1 - np.prod(1 - P, axis=1)[:, np.newaxis]))
 
 
+def _resolve_phewas_file_columns(
+    runtime,
+    header_cols,
+    gene_phewas_bfs_id_col=None,
+    gene_phewas_bfs_pheno_col=None,
+    gene_phewas_bfs_log_bf_col=None,
+    gene_phewas_bfs_combined_col=None,
+    gene_phewas_bfs_prior_col=None,
+):
+    id_col_name = gene_phewas_bfs_id_col if gene_phewas_bfs_id_col is not None else "Gene"
+    pheno_col_name = gene_phewas_bfs_pheno_col if gene_phewas_bfs_pheno_col is not None else "Pheno"
+    return {
+        "id_col": runtime._get_col(id_col_name, header_cols),
+        "pheno_col": runtime._get_col(pheno_col_name, header_cols),
+        "bf_col": runtime._get_col(gene_phewas_bfs_log_bf_col, header_cols) if gene_phewas_bfs_log_bf_col is not None else runtime._get_col("log_bf", header_cols, False),
+        "combined_col": runtime._get_col(gene_phewas_bfs_combined_col, header_cols, True) if gene_phewas_bfs_combined_col is not None else runtime._get_col("combined", header_cols, False),
+        "prior_col": runtime._get_col(gene_phewas_bfs_prior_col, header_cols, True) if gene_phewas_bfs_prior_col is not None else runtime._get_col("prior", header_cols, False),
+    }
+
+
+def _expand_phewas_state_for_added_phenos(runtime, num_added_phenos):
+    if num_added_phenos <= 0:
+        return
+    if runtime.X_phewas_beta is not None:
+        runtime.X_phewas_beta = sparse.csc_matrix(
+            sparse.vstack((runtime.X_phewas_beta, sparse.csc_matrix((num_added_phenos, runtime.X_phewas_beta.shape[1]))))
+        )
+    if runtime.X_phewas_beta_uncorrected is not None:
+        runtime.X_phewas_beta_uncorrected = sparse.csc_matrix(
+            sparse.vstack((runtime.X_phewas_beta_uncorrected, sparse.csc_matrix((num_added_phenos, runtime.X_phewas_beta_uncorrected.shape[1]))))
+        )
+    if runtime.gene_pheno_Y is not None:
+        runtime.gene_pheno_Y = sparse.csc_matrix(
+            sparse.hstack((runtime.gene_pheno_Y, sparse.csc_matrix((runtime.gene_pheno_Y.shape[0], num_added_phenos))))
+        )
+    if runtime.gene_pheno_combined_prior_Ys is not None:
+        runtime.gene_pheno_combined_prior_Ys = sparse.csc_matrix(
+            sparse.hstack((runtime.gene_pheno_combined_prior_Ys, sparse.csc_matrix((runtime.gene_pheno_combined_prior_Ys.shape[0], num_added_phenos))))
+        )
+    if runtime.gene_pheno_priors is not None:
+        runtime.gene_pheno_priors = sparse.csc_matrix(
+            sparse.hstack((runtime.gene_pheno_priors, sparse.csc_matrix((runtime.gene_pheno_priors.shape[0], num_added_phenos))))
+        )
+
+
 class EagglState(object):
     '''
     Stores gene and gene set annotations and derived matrices
@@ -2913,31 +2958,6 @@ class EagglState(object):
             one_sided_append,
         )
 
-    def _resolve_phewas_file_columns(self, header_cols, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None):
-        id_col_name = gene_phewas_bfs_id_col if gene_phewas_bfs_id_col is not None else "Gene"
-        pheno_col_name = gene_phewas_bfs_pheno_col if gene_phewas_bfs_pheno_col is not None else "Pheno"
-        return {
-            "id_col": self._get_col(id_col_name, header_cols),
-            "pheno_col": self._get_col(pheno_col_name, header_cols),
-            "bf_col": self._get_col(gene_phewas_bfs_log_bf_col, header_cols) if gene_phewas_bfs_log_bf_col is not None else self._get_col("log_bf", header_cols, False),
-            "combined_col": self._get_col(gene_phewas_bfs_combined_col, header_cols, True) if gene_phewas_bfs_combined_col is not None else self._get_col("combined", header_cols, False),
-            "prior_col": self._get_col(gene_phewas_bfs_prior_col, header_cols, True) if gene_phewas_bfs_prior_col is not None else self._get_col("prior", header_cols, False),
-        }
-
-    def _expand_phewas_state_for_added_phenos(self, num_added_phenos):
-        if num_added_phenos <= 0:
-            return
-        if self.X_phewas_beta is not None:
-            self.X_phewas_beta = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta.shape[1])))))
-        if self.X_phewas_beta_uncorrected is not None:
-            self.X_phewas_beta_uncorrected = sparse.csc_matrix(sparse.vstack((self.X_phewas_beta_uncorrected, sparse.csc_matrix((num_added_phenos, self.X_phewas_beta_uncorrected.shape[1])))))
-        if self.gene_pheno_Y is not None:
-            self.gene_pheno_Y = sparse.csc_matrix(sparse.hstack((self.gene_pheno_Y, sparse.csc_matrix((self.gene_pheno_Y.shape[0], num_added_phenos)))))
-        if self.gene_pheno_combined_prior_Ys is not None:
-            self.gene_pheno_combined_prior_Ys = sparse.csc_matrix(sparse.hstack((self.gene_pheno_combined_prior_Ys, sparse.csc_matrix((self.gene_pheno_combined_prior_Ys.shape[0], num_added_phenos)))))
-        if self.gene_pheno_priors is not None:
-            self.gene_pheno_priors = sparse.csc_matrix(sparse.hstack((self.gene_pheno_priors, sparse.csc_matrix((self.gene_pheno_priors.shape[0], num_added_phenos)))))
-
     def _prepare_phewas_phenos_from_file(self, gene_phewas_bfs_in, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None):
         if self.phenos is not None:
             phenos = copy.copy(self.phenos)
@@ -2950,7 +2970,8 @@ class EagglState(object):
         with open_gz(gene_phewas_bfs_in) as gene_phewas_bfs_fh:
             log("Fetching phenotypes to use", DEBUG)
             header_cols = gene_phewas_bfs_fh.readline().strip('\n').split()
-            col_info = self._resolve_phewas_file_columns(
+            col_info = _resolve_phewas_file_columns(
+                self,
                 header_cols=header_cols,
                 gene_phewas_bfs_id_col=gene_phewas_bfs_id_col,
                 gene_phewas_bfs_pheno_col=gene_phewas_bfs_pheno_col,
@@ -2982,7 +3003,7 @@ class EagglState(object):
                     phenos.append(pheno)
 
         prior_num_phenos = len(self.phenos) if self.phenos is not None else 0
-        self._expand_phewas_state_for_added_phenos(len(phenos) - prior_num_phenos)
+        _expand_phewas_state_for_added_phenos(self, len(phenos) - prior_num_phenos)
         self.phenos = phenos
         return phenos, pegs_construct_map_to_ind(phenos), col_info
 
