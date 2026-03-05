@@ -2766,9 +2766,6 @@ class EagglState(object):
         else:
             return [sparse_corr_matrix[i * n:(i + 1) * n, i * n:(i + 1) * n] for i in range(k)]
 
-    def read_gene_phewas(self):
-        return self.gene_pheno_Y is not None or  self.gene_pheno_combined_prior_Ys is not None and self.gene_pheno_priors is not None
-
     def _build_phewas_input_values(self, run_for_factors=False, min_gene_factor_weight=0):
         if run_for_factors:
             input_values = self.exp_gene_factors
@@ -3205,7 +3202,7 @@ class EagglState(object):
     def run_phewas(self, gene_phewas_bfs_in=None, gene_phewas_bfs_id_col=None, gene_phewas_bfs_pheno_col=None, gene_phewas_bfs_log_bf_col=None, gene_phewas_bfs_combined_col=None, gene_phewas_bfs_prior_col=None, run_for_factors=False, max_num_burn_in=1000, max_num_iter=1100, min_num_iter=10, num_chains=10, r_threshold_burn_in=1.01, use_max_r_for_convergence=True, max_frac_sem=0.01, gauss_seidel=False, sparse_solution=False, sparse_frac_betas=None, batch_size=1500, min_gene_factor_weight=0, **kwargs):
 
         #require X matrix
-        if gene_phewas_bfs_in is None and not self.read_gene_phewas():
+        if gene_phewas_bfs_in is None and not _has_loaded_gene_phewas(self):
             bail("Require --gene-stats-in or --gene-phewas-bfs-in with a column for log_bf/Y in this operation")
 
         if run_for_factors:
@@ -8605,6 +8602,14 @@ def _read_gene_phewas_bfs(
     state.phewas_state = pegs_sync_phewas_runtime_state(state)
 
 
+def _has_loaded_gene_phewas(runtime):
+    return (
+        runtime.gene_pheno_Y is not None
+        or runtime.gene_pheno_combined_prior_Ys is not None
+        and runtime.gene_pheno_priors is not None
+    )
+
+
 def _reread_gene_phewas_bfs(state):
     if state.cached_gene_phewas_call is None:
         return
@@ -8670,7 +8675,7 @@ def _resolve_gene_phewas_input_for_stage(g, requested_input, reusable_inputs):
     return pegs_resolve_gene_phewas_input_for_stage(
         requested_input=requested_input,
         reusable_inputs=reusable_inputs,
-        read_gene_phewas=g.read_gene_phewas(),
+        read_gene_phewas=_has_loaded_gene_phewas(g),
         num_gene_phewas_filtered=g.num_gene_phewas_filtered,
     )
 
