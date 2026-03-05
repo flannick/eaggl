@@ -1449,50 +1449,6 @@ class EagglState(object):
         self.hyperparameter_state = pegs_sync_hyperparameter_state(self)
         self.phewas_state = pegs_sync_phewas_runtime_state(self)
 
-    #this reads a V matrix directly from a file
-    #it does not initialize an X matrix; if the X-matrix is needed, read_X should be used instead
-    def calculate_huge_scores_gwas(self, gwas_in, gwas_chrom_col=None, gwas_pos_col=None, gwas_p_col=None, gene_loc_file=None, hold_out_chrom=None, exons_loc_file=None, gwas_beta_col=None, gwas_se_col=None, gwas_n_col=None, gwas_n=None, gwas_freq_col=None, gwas_filter_col=None, gwas_filter_value=None, gwas_locus_col=None, gwas_ignore_p_threshold=None, gwas_units=None, gwas_low_p=5e-8, gwas_high_p=1e-2, gwas_low_p_posterior=0.98, gwas_high_p_posterior=0.001, detect_low_power=None, detect_high_power=None, detect_adjust_huge=False, learn_window=False, closest_gene_prob=0.7, max_closest_gene_prob=0.9, scale_raw_closest_gene=True, cap_raw_closest_gene=False, cap_region_posterior=True, scale_region_posterior=False, phantom_region_posterior=False, allow_evidence_of_absence=False, correct_huge=True, max_signal_p=1e-5, signal_window_size=250000, signal_min_sep=100000, signal_max_logp_ratio=None, credible_set_span=25000, max_closest_gene_dist=2.5e5, min_n_ratio=0.5, max_clump_ld=0.2, min_var_posterior=0.01, s2g_in=None, s2g_chrom_col=None, s2g_pos_col=None, s2g_gene_col=None, s2g_prob_col=None, s2g_normalize_values=None, credible_sets_in=None, credible_sets_id_col=None, credible_sets_chrom_col=None, credible_sets_pos_col=None, credible_sets_ppa_col=None, **kwargs):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _is_huge_statistics_bundle(self, huge_statistics_file):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _get_huge_statistics_paths(self, prefix):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _write_huge_statistics_vector(self, out_file, values, value_type=float):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _read_huge_statistics_vector(self, in_file, value_type=float):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _write_huge_statistics_prefix(self, prefix, gene_bf, extra_genes, extra_gene_bf, gene_bf_for_regression, extra_gene_bf_for_regression):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def _read_huge_statistics_prefix(self, prefix):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def write_huge_statistics(self, huge_statistics_out, gene_bf, extra_genes, extra_gene_bf, gene_bf_for_regression, extra_gene_bf_for_regression):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def read_huge_statistics(self, huge_statistics_in):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def calculate_huge_scores_exomes(self, exomes_in, exomes_gene_col=None, exomes_p_col=None, exomes_beta_col=None, exomes_se_col=None, exomes_n_col=None, exomes_n=None, exomes_units=None, allelic_var=0.36, exomes_low_p=2.5e-6, exomes_high_p=0.05, exomes_low_p_posterior=0.95, exomes_high_p_posterior=0.10, hold_out_chrom=None, gene_loc_file=None, **kwargs):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def read_positive_controls(self, positive_controls_in, positive_controls_id_col=None, positive_controls_prob_col=None, positive_controls_default_prob=0.95, positive_controls_has_header=True, positive_controls_list=None, positive_controls_all_in=None, positive_controls_all_id_col=None, positive_controls_all_has_header=True, hold_out_chrom=None, gene_loc_file=None, **kwargs):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def read_count_file(self, case_counts_in, ctrl_counts_in, min_revels=None, mean_rrs=None, case_counts_gene_col=None, ctrl_counts_gene_col=None, case_counts_revel_col=None, ctrl_counts_revel_col=None, case_counts_count_col=None, ctrl_counts_count_col=None, case_counts_tot_col=None, ctrl_counts_tot_col=None, case_counts_max_freq_col=None, ctrl_counts_max_freq_col=None, max_case_freq=0.001, max_ctrl_freq=0.001, syn_revel_threshold=0, syn_fisher_p=1e-4, nu=1, beta=1.0, hold_out_chrom=None, gene_loc_file=None, bound_zero=True, **kwargs):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def compute_allelic_var_and_prior(self, high_p, high_p_posterior, low_p, low_p_posterior):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
-    def combine_huge_scores(self):
-        bail("This data-ingest path moved to pigean.py and is not supported in eaggl.py")
-
     def has_gene_sets(self):
         return self.X_orig is not None and self.X_orig.shape[1] > 0
 
