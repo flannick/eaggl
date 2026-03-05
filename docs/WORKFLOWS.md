@@ -240,6 +240,12 @@ EAGGL does not support the historical GLS/whitened-Y path.
 1. Removed aliases hard-fail if passed (`--run-gls`, `run_gls`, `store_cholesky`).
 2. Correlation-aware behavior in EAGGL uses the retained corrected-OLS path only.
 
+## Gene-set Filter Relaxation
+
+When EAGGL invokes shared read-X filtering, `--increase-filter-gene-set-p` is treated
+as a minimum kept-fraction target used to relax prefiltering if needed.
+Post-read filtering does not tighten this threshold.
+
 ## References
 
 1. Deterministic workflow baseline generator: `scripts/freeze_factor_workflow_effective_configs.sh`
