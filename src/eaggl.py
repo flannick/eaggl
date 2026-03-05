@@ -204,6 +204,29 @@ except ImportError:
         EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
     )
 
+try:
+    from .pegs_utils_phewas import (
+        derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
+        resolve_gene_phewas_input_decision_for_stage as pegs_resolve_gene_phewas_input_decision_for_stage,
+        build_phewas_stage_config as pegs_build_phewas_stage_config,
+    )
+    from .pegs_utils_bundle import (
+        load_and_apply_bundle_defaults as pegs_load_and_apply_bundle_defaults,
+        EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+        EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
+    )
+except ImportError:
+    from pegs_utils_phewas import (  # type: ignore
+        derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
+        resolve_gene_phewas_input_decision_for_stage as pegs_resolve_gene_phewas_input_decision_for_stage,
+        build_phewas_stage_config as pegs_build_phewas_stage_config,
+    )
+    from pegs_utils_bundle import (  # type: ignore
+        load_and_apply_bundle_defaults as pegs_load_and_apply_bundle_defaults,
+        EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS as PEGS_EAGGL_BUNDLE_ALLOWED_DEFAULT_INPUTS,
+        EAGGL_BUNDLE_SCHEMA as PEGS_EAGGL_BUNDLE_SCHEMA,
+    )
+
 # Canonical suffix tags used when expanding dense gene-set inputs into
 # sparse derived sets (top/ext/bottom thresholds).
 EXT_TAG = "ext"
