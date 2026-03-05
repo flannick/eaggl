@@ -20,3 +20,4 @@ From this repo:
 
 1. `docs/WORKFLOWS.md`: required inputs and runnable commands for all 9 factor workflows (`F1..F9`).
 2. `docs/INTEROP.md`: PIGEAN -> EAGGL handoff via `--eaggl-out` / `--eaggl-in`, plus separate-file fallback.
+3. `docs/CLI_OPTIONS.md` and `docs/cli_option_manifest.json`: auto-generated CLI inventory and category manifest.
