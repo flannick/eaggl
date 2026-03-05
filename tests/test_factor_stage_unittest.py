@@ -33,6 +33,13 @@ def _options(**overrides):
         anchor_any_pheno=False,
         anchor_any_gene=False,
         anchor_gene_set=False,
+        anchor_genes=None,
+        anchor_phenos=None,
+        positive_controls_in=None,
+        positive_controls_list=None,
+        gene_set_phewas_stats_in=None,
+        gene_phewas_bfs_in=None,
+        run_phewas_from_gene_phewas_stats_in=None,
         no_transpose=False,
         min_lambda_threshold=1e-3,
         lmm_auth_key=None,
@@ -147,6 +154,36 @@ class FactorStageHelpersTest(unittest.TestCase):
             ("write_clusters", "gs_anchor_cluster.tsv", "g_anchor_cluster.tsv", "p_anchor_cluster.tsv", True),
         )
         self.assertEqual(runtime.calls[4], ("write_gene_pheno_statistics", "gene_pheno.tsv", 0.2))
+
+    def test_workflow_required_inputs_contract_for_f1_to_f9(self) -> None:
+        cases = [
+            ("F1", _options(), []),
+            ("F2", _options(positive_controls_list=["INS"]), []),
+            ("F3", _options(gene_phewas_bfs_in="gene_phewas.tsv"), []),
+            ("F4", _options(anchor_phenos=["T2D"], gene_set_phewas_stats_in="gs.tsv", gene_phewas_bfs_in="g.tsv"), []),
+            ("F5", _options(anchor_any_pheno=True, gene_set_phewas_stats_in="gs.tsv", gene_phewas_bfs_in="g.tsv"), []),
+            ("F6", _options(anchor_genes=["INS"], gene_set_phewas_stats_in="gs.tsv", gene_phewas_bfs_in="g.tsv"), []),
+            ("F7", _options(anchor_genes=["INS", "GCK"], gene_set_phewas_stats_in="gs.tsv", gene_phewas_bfs_in="g.tsv"), []),
+            ("F8", _options(anchor_any_gene=True, gene_set_phewas_stats_in="gs.tsv", gene_phewas_bfs_in="g.tsv"), []),
+            ("F9", _options(anchor_gene_set=True, run_phewas_from_gene_phewas_stats_in="g.tsv"), []),
+        ]
+        for workflow_id, options, expected_missing in cases:
+            with self.subTest(workflow=workflow_id):
+                workflow = eaggl._classify_factor_workflow(options)
+                self.assertEqual(workflow["id"], workflow_id)
+                self.assertEqual(workflow["missing_required_inputs"], expected_missing)
+                self.assertEqual(
+                    workflow["factor_gene_set_x_pheno"],
+                    eaggl._FACTOR_WORKFLOW_STRATEGY_META[workflow_id]["factor_gene_set_x_pheno"],
+                )
+
+    def test_workflow_required_inputs_missing_for_f6(self) -> None:
+        workflow = eaggl._classify_factor_workflow(_options(anchor_genes=["INS"]))
+        self.assertEqual(workflow["id"], "F6")
+        self.assertEqual(
+            workflow["missing_required_inputs"],
+            ["--gene-set-phewas-stats-in", "--gene-phewas-stats-in"],
+        )
 
 
 if __name__ == "__main__":
