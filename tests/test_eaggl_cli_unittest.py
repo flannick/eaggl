@@ -54,6 +54,12 @@ class EagglCliTest(unittest.TestCase):
         err = (proc.stderr or "") + (proc.stdout or "")
         self.assertIn("option --gene-zs-in has been removed and is no longer supported", err)
 
+    def test_removed_run_gls_flag_is_rejected(self) -> None:
+        proc = self._run("factor", "--run-gls")
+        self.assertNotEqual(proc.returncode, 0)
+        err = (proc.stderr or "") + (proc.stdout or "")
+        self.assertIn("option --run-gls has been removed and is no longer supported", err)
+
     def test_factor_workflow_ids_in_effective_config(self) -> None:
         cases = [
             ("F1", []),
@@ -197,7 +203,7 @@ try:
     g._read_correlations(gene_loc_file="definitely_missing.tsv")
 except Exception as ex:
     msg = str(ex)
-    if "Cannot read/sort correlations after initializing full GLS correlation state" not in msg:
+    if "full GLS correlation state" not in msg:
         raise SystemExit("unexpected error: " + msg)
     raise SystemExit(0)
 raise SystemExit("expected _read_correlations to fail fast before file IO")

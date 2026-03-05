@@ -233,6 +233,13 @@ $PYTHON src/eaggl.py factor \
 2. Missing required inputs hard-fail with an actionable message.
 3. For overlapping flags, EAGGL applies workflow-specific precedence and logs warnings for ignored inputs.
 
+## Removed Legacy GLS Path
+
+EAGGL does not support the historical GLS/whitened-Y path.
+
+1. Removed aliases hard-fail if passed (`--run-gls`, `run_gls`, `store_cholesky`).
+2. Correlation-aware behavior in EAGGL uses the retained corrected-OLS path only.
+
 ## References
 
 1. Deterministic workflow baseline generator: `scripts/freeze_factor_workflow_effective_configs.sh`

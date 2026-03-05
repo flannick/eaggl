@@ -590,6 +590,8 @@ REMOVED_OPTION_REPLACEMENTS = {
     "chisq_dynamic": None,
     "desired_intercept_difference": None,
     "chisq_threshold": None,
+    "run_gls": None,
+    "store_cholesky": None,
 }
 
 def _enforce_eaggl_mode_ownership(_mode):
