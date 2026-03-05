@@ -27,12 +27,18 @@ In `pigean-shared`:
 
 ```text
 src/shared/io_tables.py
+src/pegs_utils_bundle.py
+src/pegs_utils_phewas.py
+src/pegs_sync_guard.py
 ```
 
 In each consumer repo:
 
 ```text
 src/shared/io_tables.py
+src/pegs_utils_bundle.py
+src/pegs_utils_phewas.py
+src/pegs_sync_guard.py
 ```
 
 ## Bootstrap commands
@@ -59,4 +65,6 @@ git subtree push --prefix=src/shared git@github.com:flannick/pigean-shared.git m
 
 ## Temporary local sync
 
-Until `pigean-shared` exists, use `scripts/sync_shared_to_pigean.sh` in this repo to copy shared I/O code into a sibling `pigean` checkout.
+Until `pigean-shared` exists:
+1. use `scripts/sync_shared_to_pigean.sh` in this repo to copy shared files into a sibling `pigean` checkout.
+2. run `scripts/check_shared_utils_sync.py --require-other` in each repo to verify no drift.
