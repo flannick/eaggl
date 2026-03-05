@@ -814,7 +814,7 @@ pegs_fail_removed_cli_aliases(
 )
 
 (options, args) = parser.parse_args(argv_parse)
-(options, args, config_mode, _cli_specified_dests, _config_specified_dests) = pegs_apply_cli_config_overrides(
+(options, args, config_mode, cli_specified_dests, config_specified_dests) = pegs_apply_cli_config_overrides(
     options,
     args,
     parser,
@@ -825,7 +825,7 @@ pegs_fail_removed_cli_aliases(
     bail_fn=bail,
     removed_option_replacements=REMOVED_OPTION_REPLACEMENTS,
     format_removed_option_message_fn=pegs_format_removed_option_message,
-    track_config_specified_dests=False,
+    track_config_specified_dests=True,
 )
 
 args = pegs_harmonize_cli_mode_args(args, config_mode, early_warn_fn=_early_warn)
@@ -984,11 +984,11 @@ if run_factor and factor_gene_set_x_pheno is not None:
 options.sparse_frac_betas = options.sparse_frac_betas if options.sparse_frac_betas is not None else 0.001
 options.sparse_solution = options.sparse_solution if options.sparse_solution is not None else True
 
-def _flag_present(*flag_names):
-    for arg in sys.argv[1:]:
-        for flag_name in flag_names:
-            if arg == flag_name or arg.startswith(flag_name + "="):
-                return True
+def _is_option_dest_explicit(dest):
+    if cli_specified_dests is not None and dest in cli_specified_dests:
+        return True
+    if config_specified_dests is not None and dest in config_specified_dests:
+        return True
     return False
 
 def _derive_memory_controls_from_max_gb():
@@ -1006,9 +1006,9 @@ def _derive_memory_controls_from_max_gb():
     derived = {}
     clamped = {}
 
-    def _set_with_max_cap(opt_name, implied_max, flag_name):
+    def _set_with_max_cap(opt_name, implied_max):
         current = getattr(options, opt_name)
-        explicit = _flag_present(flag_name)
+        explicit = _is_option_dest_explicit(opt_name)
         if current is None:
             new_value = implied_max
             derived[opt_name] = new_value
@@ -1020,9 +1020,9 @@ def _derive_memory_controls_from_max_gb():
                 derived[opt_name] = new_value
         setattr(options, opt_name, int(new_value))
 
-    def _set_with_min_floor(opt_name, implied_min, flag_name):
+    def _set_with_min_floor(opt_name, implied_min):
         current = getattr(options, opt_name)
-        explicit = _flag_present(flag_name)
+        explicit = _is_option_dest_explicit(opt_name)
         if current is None:
             new_value = implied_min
             derived[opt_name] = new_value
@@ -1048,14 +1048,14 @@ def _derive_memory_controls_from_max_gb():
     # This is an inverse memory knob: larger values use less memory.
     implied_priors_num_gene_batches_min = max(1, int(np.ceil(20.0 / scale)))
 
-    _set_with_max_cap("batch_size", implied_batch_size_max, "--batch-size")
-    _set_with_max_cap("gibbs_max_mb_X_h", implied_gibbs_max_mb_X_h_max, "--gibbs-max-mb-X-h")
-    _set_with_max_cap("max_read_entries_at_once", implied_max_read_entries_at_once_max, "--max-read-entries-at-once")
-    _set_with_max_cap("gibbs_num_batches_parallel", implied_gibbs_num_batches_parallel_max, "--gibbs-num-batches-parallel")
-    _set_with_max_cap("pre_filter_small_batch_size", implied_pre_filter_small_batch_size_max, "--pre-filter-small-batch-size")
+    _set_with_max_cap("batch_size", implied_batch_size_max)
+    _set_with_max_cap("gibbs_max_mb_X_h", implied_gibbs_max_mb_X_h_max)
+    _set_with_max_cap("max_read_entries_at_once", implied_max_read_entries_at_once_max)
+    _set_with_max_cap("gibbs_num_batches_parallel", implied_gibbs_num_batches_parallel_max)
+    _set_with_max_cap("pre_filter_small_batch_size", implied_pre_filter_small_batch_size_max)
     if options.pre_filter_batch_size is not None:
-        _set_with_max_cap("pre_filter_batch_size", implied_pre_filter_batch_size_max, "--pre-filter-batch-size")
-    _set_with_min_floor("priors_num_gene_batches", implied_priors_num_gene_batches_min, "--priors-num-gene-batches")
+        _set_with_max_cap("pre_filter_batch_size", implied_pre_filter_batch_size_max)
+    _set_with_min_floor("priors_num_gene_batches", implied_priors_num_gene_batches_min)
 
     log("Memory controls: --max-gb=%.3g (%.0f MB total), effective batch controls: max_read_entries_at_once=%d, priors_num_gene_batches=%d, gibbs_num_batches_parallel=%d, gibbs_max_mb_X_h=%d, batch_size=%d, pre_filter_batch_size=%s, pre_filter_small_batch_size=%d" % (options.max_gb, total_mb, options.max_read_entries_at_once, options.priors_num_gene_batches, options.gibbs_num_batches_parallel, options.gibbs_max_mb_X_h, options.batch_size, str(options.pre_filter_batch_size), options.pre_filter_small_batch_size), INFO)
     if len(derived) > 0:
