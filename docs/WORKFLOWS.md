@@ -232,6 +232,9 @@ $PYTHON src/eaggl.py factor \
 1. Use `--print-effective-config` first to verify the selected workflow ID and required inputs.
 2. Missing required inputs hard-fail with an actionable message.
 3. For overlapping flags, EAGGL applies workflow-specific precedence and logs warnings for ignored inputs.
+4. PheWAS stages log explicit input-I/O mode:
+   - `mode=reuse_loaded_matrix` when a compatible loaded matrix is reused.
+   - `mode=re_read_file` when stage inputs must be read from file again.
 
 ## Removed Legacy GLS Path
 
