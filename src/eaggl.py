@@ -1087,6 +1087,14 @@ def _bind_hyperparameter_properties(state_cls):
         setattr(state_cls, field_name, property(_getter, _setter))
 
 
+def _append_with_any_user(P):
+    if P is None:
+        return None
+    if sparse.issparse(P):
+        P = P.todense()
+    return np.hstack((P, 1 - np.prod(1 - P, axis=1)[:, np.newaxis]))
+
+
 class EagglState(object):
     '''
     Stores gene and gene set annotations and derived matrices
@@ -1542,14 +1550,6 @@ class EagglState(object):
                         
             params_fh.close()
 
-    def _append_with_any_user(self, P):
-        if P is None:
-            return None
-        else:
-            if sparse.issparse(P):
-                P = P.todense()
-            return np.hstack((P, 1 - np.prod(1 - P, axis=1)[:,np.newaxis]))
-
     def _project_H_with_fixed_W(self, W, V_new, P_gene_set, P_gene_new, phi=0.0, lambdak=None, n_iter=100, tol=1e-5, normalize_genes=False, cap_genes=False, add_intercept=False):
         """
         Projects new genes onto the learned NMF factors W using update rules consistent with the original NMF algorithm.
@@ -1580,8 +1580,8 @@ class EagglState(object):
         if sparse.issparse(V_new):
             V_new = V_new.toarray()
 
-        P_gene_set = self._append_with_any_user(P_gene_set)
-        P_gene_new = self._append_with_any_user(P_gene_new)
+        P_gene_set = _append_with_any_user(P_gene_set)
+        P_gene_new = _append_with_any_user(P_gene_new)
 
         use_extended = P_gene_new is not None or P_gene_set is not None
         if use_extended:
@@ -1782,8 +1782,8 @@ class EagglState(object):
         n_lambda = [lambdak]
         it = 1
 
-        P_gene_set = self._append_with_any_user(P_gene_set)
-        P_gene = self._append_with_any_user(P_gene)
+        P_gene_set = _append_with_any_user(P_gene_set)
+        P_gene = _append_with_any_user(P_gene)
 
         # Check if P_gene and P_gene_set are specified
         use_extended = P_gene is not None or P_gene_set is not None
