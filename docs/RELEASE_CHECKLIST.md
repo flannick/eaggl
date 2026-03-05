@@ -24,4 +24,5 @@ cd eaggl
 ## Artifacts
 - `reports/release_v1/pytest.full.out`
 - `reports/release_v1/finalize_checks.out`
-- matching `*.time` files with runtime/memory metrics
+- matching `*.metrics.json` files with runtime/memory metrics
+- matching `*.err` files for stderr capture
