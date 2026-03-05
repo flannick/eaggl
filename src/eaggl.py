@@ -79,7 +79,7 @@ try:
         compute_beta_tildes as pegs_compute_beta_tildes,
         compute_multivariate_beta_tildes as pegs_compute_multivariate_beta_tildes,
         derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
-        resolve_gene_phewas_input_for_stage as pegs_resolve_gene_phewas_input_for_stage,
+        resolve_gene_phewas_input_decision_for_stage as pegs_resolve_gene_phewas_input_decision_for_stage,
         build_phewas_stage_config as pegs_build_phewas_stage_config,
         remove_tag_from_input as pegs_remove_tag_from_input,
         XReadConfig as PegsXReadConfig,
@@ -167,7 +167,7 @@ except ImportError:
         compute_beta_tildes as pegs_compute_beta_tildes,
         compute_multivariate_beta_tildes as pegs_compute_multivariate_beta_tildes,
         derive_factor_anchor_masks as pegs_derive_factor_anchor_masks,
-        resolve_gene_phewas_input_for_stage as pegs_resolve_gene_phewas_input_for_stage,
+        resolve_gene_phewas_input_decision_for_stage as pegs_resolve_gene_phewas_input_decision_for_stage,
         build_phewas_stage_config as pegs_build_phewas_stage_config,
         remove_tag_from_input as pegs_remove_tag_from_input,
         XReadConfig as PegsXReadConfig,
@@ -7324,8 +7324,8 @@ def _write_main_primary_outputs(g, options):
         g.write_gene_effectors(options.gene_effectors_out)
 
 
-def _resolve_gene_phewas_input_for_stage(g, requested_input, reusable_inputs):
-    return pegs_resolve_gene_phewas_input_for_stage(
+def _resolve_gene_phewas_stage_decision(g, requested_input, reusable_inputs):
+    return pegs_resolve_gene_phewas_input_decision_for_stage(
         requested_input=requested_input,
         reusable_inputs=reusable_inputs,
         read_gene_phewas=_has_loaded_gene_phewas(g),
@@ -7360,11 +7360,13 @@ def _run_phewas_with_common_args(g, options, gene_phewas_bfs_in, run_for_factors
 
 
 def _run_main_phewas_stage(g, options):
-    bfs_to_use = _resolve_gene_phewas_input_for_stage(
+    decision = _resolve_gene_phewas_stage_decision(
         g,
         options.run_phewas_from_gene_phewas_stats_in,
         [options.gene_phewas_bfs_in],
     )
+    log("PheWAS stage 'phewas': mode=%s reason=%s" % (decision.mode, decision.reason), INFO)
+    bfs_to_use = decision.resolved_input
     _run_phewas_with_common_args(g, options, bfs_to_use, run_for_factors=False)
     if options.phewas_stats_out:
         g.write_phewas_statistics(options.phewas_stats_out)
@@ -7403,11 +7405,16 @@ def _run_main_factor_phewas_stage(g, options):
         log("No factors; not performing factor phewas")
         return PhewasStageResult(ran=False, output_path=options.factor_phewas_stats_out)
 
-    bfs_to_use = _resolve_gene_phewas_input_for_stage(
+    decision = _resolve_gene_phewas_stage_decision(
         g,
         options.factor_phewas_from_gene_phewas_stats_in,
         [options.gene_phewas_bfs_in, options.run_phewas_from_gene_phewas_stats_in],
     )
+    log(
+        "PheWAS stage 'factor_phewas': mode=%s reason=%s" % (decision.mode, decision.reason),
+        INFO,
+    )
+    bfs_to_use = decision.resolved_input
     _run_phewas_with_common_args(
         g,
         options,
