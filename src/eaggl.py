@@ -1296,8 +1296,6 @@ class EagglState(object):
         self.y_var = 1 #total variance of the Y
         self.Y_orig = None
         self.Y_for_regression_orig = None
-        self.Y_w_orig = None
-        self.Y_fw_orig = None
 
 
         self.gene_locations = None #this stores sort orders for genes, which is populated when fitting correlation matrix from gene loc file
@@ -1350,11 +1348,9 @@ class EagglState(object):
         #In addition to storing cholesky decomp, this being set to not None triggers everything to operate in full GLS mode
         self.y_corr_cholesky = None #this stores the cholesky decomposition of the (banded) correlation matrix for the Y values
         #these are the "whitened" ys that are multiplied by sigma^{-1/2}
-        self.Y_w = None
         self.y_w_var = 1 #total variance of the whitened Y
         self.y_w_mean = 0 #total mean of the whitened Y
         #these are the "full whitened" ys that are multiplied by sigma^{-1}
-        self.Y_fw = None
         self.y_fw_var = 1 #total variance of the whitened Y
         self.y_fw_mean = 0 #total mean of the whitened Y
 
@@ -5528,7 +5524,7 @@ class EagglState(object):
 
     #store Y value
     #Y is whitened if Y_corr_m is not null
-    def _set_Y(self, Y, Y_for_regression=None, Y_exomes=None, Y_positive_controls=None, Y_case_counts=None, Y_corr_m=None, store_cholesky=True, store_corr_sparse=False, skip_V=False, skip_scale_factors=False, min_correlation=0):
+    def _set_Y(self, Y, Y_for_regression=None, Y_exomes=None, Y_positive_controls=None, Y_case_counts=None, Y_corr_m=None, store_corr_sparse=False, skip_V=False, skip_scale_factors=False, min_correlation=0):
         log("Setting Y", TRACE)
         self.last_X_block = None
         self.y_state = pegs_set_runtime_y_from_inputs(
@@ -5971,7 +5967,6 @@ class EagglState(object):
         if self.gene_ignored_N is not None:
             self.gene_ignored_N = self.gene_ignored_N[sorted_gene_indices]
 
-        for x in [self.Y, self.Y_r_hat, self.Y_mcse, self.Y_for_regression, self.Y_uncorrected, self.Y_exomes, self.Y_positive_controls, self.Y_case_counts, self.Y_w, self.Y_fw, self.priors, self.priors_r_hat, self.priors_mcse, self.priors_adj, self.combined_prior_Ys, self.combined_prior_Ys_r_hat, self.combined_prior_Ys_mcse, self.combined_prior_Ys_adj, self.combined_Ds, self.Y_orig, self.Y_for_regression_orig, self.Y_w_orig, self.Y_fw_orig, self.priors_orig, self.priors_adj_orig]:
             if x is not None:
                 x[:] = np.array([x[i] for i in sorted_gene_indices])
 
@@ -6197,7 +6192,7 @@ class EagglState(object):
 
         if not skip_Y:
             if self.Y is not None:
-                self._set_Y(self.Y[gene_mask], self.Y_for_regression[gene_mask] if self.Y_for_regression is not None else None, self.Y_exomes[gene_mask] if self.Y_exomes is not None else None, self.Y_positive_controls[gene_mask] if self.Y_positive_controls is not None else None, self.Y_case_counts[gene_mask] if self.Y_case_counts is not None else None, Y_corr_m=self.y_corr[:,gene_mask] if self.y_corr is not None else None, store_cholesky=self.y_corr_cholesky is not None, store_corr_sparse=self.y_corr_sparse is not None, skip_V=skip_V)
+                self._set_Y(self.Y[gene_mask], self.Y_for_regression[gene_mask] if self.Y_for_regression is not None else None, self.Y_exomes[gene_mask] if self.Y_exomes is not None else None, self.Y_positive_controls[gene_mask] if self.Y_positive_controls is not None else None, self.Y_case_counts[gene_mask] if self.Y_case_counts is not None else None, Y_corr_m=self.y_corr[:,gene_mask] if self.y_corr is not None else None, store_corr_sparse=self.y_corr_sparse is not None, skip_V=skip_V)
 
             if self.Y_uncorrected is not None:
                 self.Y_uncorrected = self.Y_uncorrected[gene_mask]
@@ -6245,10 +6240,6 @@ class EagglState(object):
                 self.Y_orig = self.Y_orig[gene_mask]
             if self.Y_for_regression_orig is not None:
                 self.Y_for_regression_orig = self.Y_for_regression_orig[gene_mask]
-            if self.Y_w_orig is not None:
-                self.Y_w_orig = self.Y_w_orig[gene_mask]
-            if self.Y_fw_orig is not None:
-                self.Y_fw_orig = self.Y_fw_orig[gene_mask]
             if self.priors_orig is not None:
                 self.priors_missing_orig = (self.priors_missing_orig if self.priors_missing_orig is not None else []) + [self.priors_orig[i] for i in range(len(self.priors_orig)) if not gene_mask[i]]
                 self.priors_orig = self.priors_orig[gene_mask]
@@ -6264,7 +6255,6 @@ class EagglState(object):
                 self.gene_pheno_priors = self.gene_pheno_priors[gene_mask,:]
 
 
-        #for x in [self.priors, self.combined_prior_Ys, self.Y_orig, self.Y_w_orig, self.Y_fw_orig, self.priors_orig, self.combined_prior_Ys_orig]:
         #    if x is not None:
         #        x[:] = np.concatenate((x[gene_mask], x[~gene_mask]))
 
